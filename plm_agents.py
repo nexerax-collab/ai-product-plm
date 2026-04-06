@@ -1204,6 +1204,30 @@ async def _execute_async(plan: dict) -> list[dict]:
         ref_to_fid    = {}   # ref → Onshape featureId
         ref_to_step   = {}   # ref → original step dict (for pattern fallback)
 
+        def _f(v) -> float:
+            """Coerce any coordinate value to float.
+            Handles: plain numbers, numeric strings, '#varname' expressions (→ 0.0 fallback),
+            and single-element lists (Claude sometimes wraps scalars in a list).
+            """
+            if isinstance(v, list):
+                v = v[0] if v else 0
+            if isinstance(v, str):
+                # strip variable references like '#desk_w' or expressions — use 0 as fallback
+                try:
+                    return float(v.replace("#", "").replace(" in", "").strip())
+                except ValueError:
+                    return 0.0
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def _fxy(pair, fallback=(0.0, 0.0)) -> tuple:
+            """Coerce a [x, y] pair to (float, float)."""
+            if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+                return (_f(pair[0]), _f(pair[1]))
+            return fallback
+
         async def _make_sketch(name: str, plane_name: str, step: dict) -> tuple[str, str]:
             """Build and post a sketch; returns (featureId, plane_name)."""
             plane    = SketchPlane[plane_name.upper()]
@@ -1213,30 +1237,30 @@ async def _execute_async(plan: dict) -> list[dict]:
 
             if tool == "rect_sketch":
                 sketch.add_rectangle(
-                    corner1=tuple(step["corner1"]),
-                    corner2=tuple(step["corner2"]),
+                    corner1=_fxy(step["corner1"]),
+                    corner2=_fxy(step["corner2"]),
                     variable_width=step.get("variableWidth"),
                     variable_height=step.get("variableHeight"),
                 )
             elif tool == "circle_sketch":
                 sketch.add_circle(
-                    center=(step.get("centerX", 0), step.get("centerY", 0)),
-                    radius=step.get("radius", 1.0),
+                    center=(_f(step.get("centerX", 0)), _f(step.get("centerY", 0))),
+                    radius=_f(step.get("radius", 1.0)),
                 )
             elif tool == "polygon_sketch":
                 sketch.add_polygon(
-                    center=(step.get("centerX", 0), step.get("centerY", 0)),
-                    sides=step.get("sides", 6),
-                    radius=step.get("radius", 0.2),
+                    center=(_f(step.get("centerX", 0)), _f(step.get("centerY", 0))),
+                    sides=int(step.get("sides", 6)),
+                    radius=_f(step.get("radius", 0.2)),
                 )
             elif tool == "line_polygon":
-                verts = step.get("vertices", [])
+                verts = [_fxy(v) for v in step.get("vertices", [])]
                 if len(verts) < 3:
                     raise ValueError("line_polygon needs at least 3 vertices")
                 for i in range(len(verts)):
                     sketch.add_line(
-                        start=tuple(verts[i]),
-                        end=tuple(verts[(i + 1) % len(verts)]),
+                        start=verts[i],
+                        end=verts[(i + 1) % len(verts)],
                     )
 
             r   = await ps.add_feature(did, wid, eid, sketch.build())
@@ -1337,12 +1361,12 @@ async def _execute_async(plan: dict) -> list[dict]:
                                     sk_step.get("vertices", []), angle)
                             elif sk_tool in ("circle_sketch", "polygon_sketch"):
                                 cx, cy = _rotate_point(
-                                    sk_step.get("centerX", 0),
-                                    sk_step.get("centerY", 0), angle)
+                                    _f(sk_step.get("centerX", 0)),
+                                    _f(sk_step.get("centerY", 0)), angle)
                                 rotated_step = dict(sk_step, centerX=cx, centerY=cy)
                             elif sk_tool == "rect_sketch":
-                                c1 = _rotate_vertices([sk_step["corner1"]], angle)[0]
-                                c2 = _rotate_vertices([sk_step["corner2"]], angle)[0]
+                                c1 = _rotate_vertices([_fxy(sk_step["corner1"])], angle)[0]
+                                c2 = _rotate_vertices([_fxy(sk_step["corner2"])], angle)[0]
                                 rotated_step = dict(sk_step, corner1=c1, corner2=c2)
 
                             sk_fid, _ = await _make_sketch(
