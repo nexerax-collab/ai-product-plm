@@ -1405,6 +1405,14 @@ def _execute_plan(plan: dict) -> list[dict]:
         print("  ⚠ No steps to execute")
         return []
 
+    # Enforce step cap — always keep all set_variable steps, then fill remaining slots with geometry
+    if len(steps) > CAD_MAX_STEPS:
+        vars_  = [s for s in steps if s.get("tool") == "set_variable"]
+        geo    = [s for s in steps if s.get("tool") != "set_variable"]
+        steps  = vars_ + geo[:CAD_MAX_STEPS - len(vars_)]
+        plan   = {**plan, "steps": steps}
+        print(f"  ⚠ Plan truncated to {len(steps)} steps (cap={CAD_MAX_STEPS})")
+
     if not _MCP_AVAILABLE:
         print("  ⚠ onshape-mcp not available — simulation mode")
         for s in steps:
