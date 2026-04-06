@@ -1,19 +1,38 @@
-# AI Product PLM Agent
+# AI Product Agents
 
-A multi-agent system for AI-driven product configuration, bill of materials generation, and optional CAD model creation — for **any product type**.
+A multi-agent system that takes a product idea and a design intent, then configures, evaluates, and builds it — automatically.
 
-**Pipeline:**
 ```
-Product Idea  (you type: "electric mountain bike", "inspection drone", etc.)
-  → Product Family Agent   — defines features, options, constraints, variants
-  → Configurator Agent     — selects a valid configuration and builds a BOM
-  → Evaluator Agent        — scores the design across product-specific dimensions
-  → Optimizer Agent        — fixes issues and improves scores iteratively
-  → PLM Agent              — persists BOM to Airtable
-  → CAD Agent (optional)   — generates a parametric 3D model in Onshape
+Your idea  →  "electric mountain bike"
+Your intent →  "maximum range, cost under €2000"
+
+  Product Family Agent   — defines features, options, constraints, variants
+  Configurator Agent     — selects a valid configuration and builds a BOM
+  Evaluator Agent        — scores the design against what matters for this product
+  Optimizer Agent        — fixes issues and improves scores iteratively
+  Builder Agent          — writes the result to Airtable
+  CAD Agent (optional)   — generates a parametric 3D model in Onshape
 ```
 
-Powered by Claude claude-sonnet-4-6 / Opus 4.6 and connected to Airtable for PLM data and Onshape for CAD.
+Works for any product — bikes, robots, cameras, machines, drones, appliances.
+
+---
+
+## How it works
+
+**1. You give it a product idea.**
+Anything: `inspection robot`, `portable solar station`, `espresso machine for cafes`.
+
+**2. The system defines the product family.**
+It creates a structured feature model — features, options per feature, cross-feature constraints, and 2–3 predefined variants. Like a configurator in Configit or pure::variants, but generated from scratch.
+
+**3. You define your intent.**
+Based on the product family it just built, the system shows you the relevant features and scoring dimensions, then asks:
+- What do you want to optimise for?
+- What are your hard constraints?
+
+**4. The agents run.**
+Configuration → Evaluation → Optimization loop → Airtable → optional CAD in Onshape.
 
 ---
 
@@ -43,7 +62,7 @@ Open `.env` and fill in:
 | `ONSHAPE_ACCESS_KEY` / `ONSHAPE_SECRET_KEY` | [dev-portal.onshape.com/keys](https://dev-portal.onshape.com/keys) _(CAD only)_ |
 | `ONSHAPE_DID` / `ONSHAPE_WID` / `ONSHAPE_EID` | Your Onshape document URL _(CAD only)_ |
 
-Onshape keys are optional — skip the CAD step and the rest of the pipeline works fine.
+Onshape keys are optional — skip the CAD step and everything else still works.
 
 ### 3. Airtable base structure
 
@@ -64,48 +83,23 @@ Create a base with these tables:
 python plm_agents.py
 ```
 
-You will be prompted for:
-1. **Product idea** — anything: `inspection drone`, `electric mountain bike`, `espresso machine`
-2. **Design intent** — your goal and hard constraints, shown after the product family is generated
-
----
-
-## How it works
-
-### Product Family Agent
-Takes your product idea and defines a structured feature model — like Configit or pure::variants. Returns features (enum/boolean/numeric), options per feature, cross-feature constraints, 2–3 predefined variants, and the scoring dimensions used by the evaluator.
-
-### Configurator Agent
-Uses the family definition to select a valid configuration and generate a realistic BOM with part numbers, names, categories, and quantities.
-
-### Evaluator + Optimizer loop
-Scores the configuration against the product-specific dimensions (e.g. `range_km`, `trail_performance`, `cost` for an e-bike). Runs up to 5 iterations, stopping when the primary metric hits ≥ 8/10 with no critical issues.
-
-### PLM Agent
-Writes all parts and BOM entries to Airtable in batched requests.
-
-### CAD Agent _(optional)_
-Generates a parametric 3D model in Onshape using the onshape-mcp library. The product type and BOM drive the geometry — Claude reasons about what the product looks like and maps each BOM component to sketches, extrudes, revolves, and patterns. Prompted after PLM — you choose whether to run it.
-
 ---
 
 ## Models
 
 | Agent | Model |
 |---|---|
-| Product Family, Configurator, Evaluator, Optimizer, PLM | `claude-sonnet-4-6` |
+| Product Family, Configurator, Evaluator, Optimizer | `claude-sonnet-4-6` |
 | CAD planning | `claude-opus-4-6` with extended thinking |
 
 ---
 
 ## Notes
 
-- **Fully product-agnostic** — the family defines scoring dimensions, the CAD agent infers geometry from the product type and BOM.
+- **Product-agnostic** — scoring dimensions, features, and CAD geometry all come from the product family the system defines, not hardcoded rules.
 - **Last design cached** in `.last_bom.json` (gitignored) — next run offers to skip straight to CAD.
-- **Prompt caching** on evaluator/optimizer system prompts cuts API cost in long optimization loops.
+- **Prompt caching** on evaluator/optimizer system prompts cuts API cost during optimization loops.
 
 ---
 
-## Environment variables
-
-See [`.env.example`](.env.example) for the full list with descriptions.
+See [`.env.example`](.env.example) for the full environment variable reference.
