@@ -1560,15 +1560,18 @@ def orchestrator(intent: Intent, family: dict) -> dict:
     print(f"  Max iters   : {MAX_ITER}")
 
     # Step 1 — initial configuration (guided by family)
-    config    = configurator_agent(intent, family=family)
-    best_bom  = config.get("bom", [])
-    last_eval = {}
+    config          = configurator_agent(intent, family=family)
+    best_bom        = config.get("bom", [])
+    last_eval       = {}
+    score_history   = []   # [{iteration, scores}] for the journey chart
 
     # Step 2 — evaluate / optimize loop
     for iteration in range(1, MAX_ITER + 1):
         separator(f"ITERATION {iteration} / {MAX_ITER}")
 
         last_eval = evaluator_agent(config)
+        score_history.append({"iteration": iteration,
+                               "scores": dict(last_eval.get("scores", {}))})
 
         if should_stop(last_eval, iteration, intent, family):
             metric = _primary_metric(intent, family)
@@ -1649,13 +1652,14 @@ def orchestrator(intent: Intent, family: dict) -> dict:
 """)
 
     outcome = {
-        "intent":       intent,
-        "family":       family,
-        "final_config": config,
-        "evaluation":   last_eval,
-        "plm_result":   plm_result,
-        "cad_result":   cad_result,
-        "image_result": image_result,
+        "intent":        intent,
+        "family":        family,
+        "final_config":  config,
+        "evaluation":    last_eval,
+        "score_history": score_history,
+        "plm_result":    plm_result,
+        "cad_result":    cad_result,
+        "image_result":  image_result,
     }
     _save_html_report(outcome)
     return outcome
@@ -1698,161 +1702,250 @@ def _load_last_session() -> tuple[list | None, dict | None]:
 # ─────────────────────────────────────────────────────────────
 
 def _save_html_report(outcome: dict) -> None:
-    """Generate and save a self-contained HTML report. Opens in browser."""
+    """Generate and save a self-contained HTML report with charts. Opens in browser."""
     import time as _time, base64 as _b64, webbrowser as _wb
 
-    intent      = outcome["intent"]
-    family      = outcome["family"]
-    config      = outcome["final_config"]
-    evaluation  = outcome["evaluation"]
-    plm_result  = outcome["plm_result"]
-    cad_result  = outcome["cad_result"]
-    image_result= outcome["image_result"]
+    intent        = outcome["intent"]
+    family        = outcome["family"]
+    config        = outcome["final_config"]
+    evaluation    = outcome["evaluation"]
+    score_history = outcome.get("score_history", [])
+    plm_result    = outcome["plm_result"]
+    cad_result    = outcome["cad_result"]
+    image_result  = outcome["image_result"]
 
-    f_info      = family.get("family", {})
-    scores      = evaluation.get("scores", {})
-    issues      = evaluation.get("issues", [])
-    bom         = config.get("bom", [])
-    variants    = family.get("variants", [])
-    dims        = family.get("scoring_dimensions", [])
+    f_info        = family.get("family", {})
+    scores        = evaluation.get("scores", {})
+    issues        = evaluation.get("issues", [])
+    bom           = config.get("bom", [])
+    variants      = family.get("variants", [])
+    dims          = family.get("scoring_dimensions", [])
     configuration = config.get("configuration", {})
 
-    # Score bars
-    score_bars = ""
-    for dim in dims:
-        name = dim["name"]
-        val  = scores.get(name, 0)
-        pct  = val * 10
-        color = "#22c55e" if val >= 8 else "#f59e0b" if val >= 5 else "#ef4444"
-        score_bars += f"""
-        <div class="score-row">
-          <span class="score-label">{name}</span>
-          <div class="score-bar-bg">
-            <div class="score-bar" style="width:{pct}%;background:{color}"></div>
-          </div>
-          <span class="score-val">{val}/10</span>
-        </div>"""
+    dim_labels  = [d["name"] for d in dims] or list(scores.keys())
+    dim_values  = [scores.get(d, 0) for d in dim_labels]
 
-    # BOM table rows
+    # ── Radar chart data ──────────────────────────────────────
+    radar_labels = json.dumps(dim_labels)
+    radar_data   = json.dumps(dim_values)
+
+    # ── Journey line chart data ───────────────────────────────
+    journey_labels  = json.dumps([f"Iter {h['iteration']}" for h in score_history])
+    journey_datasets = []
+    colors = ["#6366f1","#22c55e","#f59e0b","#ef4444","#06b6d4"]
+    for i, dim in enumerate(dim_labels):
+        vals = [h["scores"].get(dim, 0) for h in score_history]
+        journey_datasets.append({
+            "label": dim,
+            "data": vals,
+            "borderColor": colors[i % len(colors)],
+            "backgroundColor": colors[i % len(colors)] + "22",
+            "tension": 0.3,
+            "fill": False,
+        })
+    journey_datasets_json = json.dumps(journey_datasets)
+    show_journey = "true" if len(score_history) > 1 else "false"
+
+    # ── BOM table + CSV export ────────────────────────────────
     bom_rows = "".join(
         f"<tr><td>{p.get('part_number','')}</td><td>{p.get('name','')}</td>"
         f"<td>{p.get('category','')}</td><td>{p.get('quantity',1)}</td></tr>"
         for p in bom
     )
+    csv_data = "part_number,name,category,quantity\\n" + "\\n".join(
+        f"{p.get('part_number','')},{p.get('name','').replace(',','')},{p.get('category','')},{p.get('quantity',1)}"
+        for p in bom
+    )
 
-    # Configuration rows
+    # ── Configuration rows ────────────────────────────────────
     cfg_rows = "".join(
         f"<tr><td>{k}</td><td>{v}</td></tr>"
         for k, v in configuration.items()
     )
 
-    # Issues
+    # ── Issues ────────────────────────────────────────────────
     issue_html = ""
     for iss in issues:
         cls  = "critical" if iss.get("type") == "critical" else "normal"
         icon = "⚠" if cls == "critical" else "•"
         issue_html += f'<div class="issue {cls}">{icon} {iss.get("text","")}</div>'
     if not issue_html:
-        issue_html = '<div class="issue ok">No critical issues</div>'
+        issue_html = '<div class="issue ok">✓ No critical issues</div>'
 
-    # Variants
+    # ── Variants ──────────────────────────────────────────────
     variant_html = ""
     for v in variants:
         cfg_preview = ", ".join(f"{k}={val}" for k, val in list(v.get("configuration", {}).items())[:4])
-        variant_html += f"<div class='variant'><strong>{v['name']}</strong> — {v.get('description','')} <br><small>{cfg_preview}</small></div>"
+        variant_html += (f"<div class='variant'><strong>{v['name']}</strong>"
+                         f" — {v.get('description','')} <br><small>{cfg_preview}</small></div>")
 
-    # Image embed
+    # ── Image embed ───────────────────────────────────────────
     img_html = ""
     img_file = image_result.get("file")
     if img_file and os.path.exists(img_file):
         with open(img_file, "rb") as fh:
             b64 = _b64.b64encode(fh.read()).decode()
-        img_html = f'<div class="section"><h2>Product Render</h2><img src="data:image/png;base64,{b64}" style="max-width:100%;border-radius:8px;"></div>'
+        img_html = f'<div class="section"><h2>Product Render</h2><img src="data:image/png;base64,{b64}" style="max-width:100%;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.15)"></div>'
 
     timestamp = _time.strftime("%Y-%m-%d %H:%M")
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <title>{f_info.get('name','Product')} — Design Report</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
-  body {{ font-family: system-ui, sans-serif; margin: 0; background: #f8fafc; color: #1e293b; }}
-  .header {{ background: linear-gradient(135deg,#1e293b,#334155); color: white; padding: 2rem; }}
-  .header h1 {{ margin: 0 0 .4rem; font-size: 1.8rem; }}
-  .header p  {{ margin: 0; opacity: .7; }}
-  .body {{ max-width: 960px; margin: 2rem auto; padding: 0 1rem; }}
-  .section {{ background: white; border-radius: 10px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.07); }}
-  h2 {{ margin: 0 0 1rem; font-size: 1.1rem; color: #475569; text-transform: uppercase; letter-spacing: .05em; }}
-  table {{ width: 100%; border-collapse: collapse; font-size: .9rem; }}
-  th {{ background: #f1f5f9; text-align: left; padding: .5rem .75rem; }}
-  td {{ padding: .45rem .75rem; border-bottom: 1px solid #f1f5f9; }}
-  .score-row {{ display:flex; align-items:center; margin-bottom:.6rem; gap:.75rem; }}
-  .score-label {{ width:200px; font-size:.85rem; color:#64748b; }}
-  .score-bar-bg {{ flex:1; background:#e2e8f0; border-radius:4px; height:12px; }}
-  .score-bar {{ height:12px; border-radius:4px; transition:width .3s; }}
-  .score-val {{ width:40px; font-weight:600; font-size:.85rem; }}
-  .issue {{ padding:.4rem .75rem; margin-bottom:.4rem; border-radius:6px; font-size:.9rem; }}
-  .issue.critical {{ background:#fef2f2; color:#991b1b; }}
-  .issue.normal   {{ background:#fffbeb; color:#92400e; }}
-  .issue.ok       {{ background:#f0fdf4; color:#166534; }}
-  .variant {{ background:#f8fafc; border-left:3px solid #6366f1; padding:.6rem 1rem; margin-bottom:.6rem; border-radius:0 6px 6px 0; font-size:.9rem; }}
-  .meta {{ display:flex; gap:1.5rem; flex-wrap:wrap; font-size:.85rem; color:#64748b; margin-top:.5rem; }}
-  .meta span b {{ color:#1e293b; }}
-  .badge {{ display:inline-block; background:#e0e7ff; color:#3730a3; padding:.2rem .6rem; border-radius:999px; font-size:.75rem; margin-right:.3rem; }}
+  *{{box-sizing:border-box}}
+  body{{font-family:system-ui,sans-serif;margin:0;background:#f1f5f9;color:#1e293b}}
+  .header{{background:linear-gradient(135deg,#0f172a,#1e40af);color:white;padding:2.5rem 2rem}}
+  .header h1{{margin:0 0 .4rem;font-size:2rem;font-weight:700}}
+  .header p{{margin:0;opacity:.65;font-size:.95rem}}
+  .body{{max-width:1000px;margin:2rem auto;padding:0 1rem}}
+  .grid{{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;margin-bottom:1.5rem}}
+  .section{{background:white;border-radius:12px;padding:1.5rem;box-shadow:0 1px 6px rgba(0,0,0,.07)}}
+  .section.full{{grid-column:1/-1}}
+  h2{{margin:0 0 1.2rem;font-size:.8rem;color:#64748b;text-transform:uppercase;letter-spacing:.08em;font-weight:600}}
+  table{{width:100%;border-collapse:collapse;font-size:.88rem}}
+  th{{background:#f8fafc;text-align:left;padding:.5rem .75rem;font-weight:600;color:#475569;border-bottom:2px solid #e2e8f0}}
+  td{{padding:.45rem .75rem;border-bottom:1px solid #f1f5f9}}
+  tr:last-child td{{border-bottom:none}}
+  .issue{{padding:.45rem .8rem;margin-bottom:.4rem;border-radius:6px;font-size:.88rem}}
+  .issue.critical{{background:#fef2f2;color:#991b1b;border-left:3px solid #ef4444}}
+  .issue.normal{{background:#fffbeb;color:#92400e;border-left:3px solid #f59e0b}}
+  .issue.ok{{background:#f0fdf4;color:#166534;border-left:3px solid #22c55e}}
+  .variant{{background:#f8fafc;border-left:3px solid #6366f1;padding:.6rem 1rem;margin-bottom:.6rem;border-radius:0 8px 8px 0;font-size:.88rem}}
+  .meta{{display:flex;gap:1.5rem;flex-wrap:wrap;font-size:.82rem;color:#64748b;margin-top:.75rem}}
+  .meta b{{color:#1e293b}}
+  .summary{{margin:.75rem 0 0;font-size:.88rem;color:#64748b;font-style:italic}}
+  .chart-wrap{{position:relative;height:260px}}
+  .btn{{display:inline-block;margin-top:1rem;padding:.45rem 1rem;background:#1e40af;color:white;border:none;border-radius:6px;font-size:.82rem;cursor:pointer;text-decoration:none}}
+  .btn:hover{{background:#1d4ed8}}
 </style>
 </head>
 <body>
 <div class="header">
-  <h1>{f_info.get('name','Product')} — Design Report</h1>
+  <h1>{f_info.get('name','Product')}</h1>
   <p>{f_info.get('description','')} &nbsp;·&nbsp; Generated {timestamp}</p>
 </div>
 <div class="body">
 
-  <div class="section">
+  <div class="section full">
     <h2>Design Goal</h2>
-    <p style="font-size:1.1rem;margin:0 0 .5rem"><strong>{intent.goal}</strong></p>
+    <p style="font-size:1.05rem;margin:0 0 .5rem;font-weight:600">{intent.goal}</p>
     <div class="meta">
       <span>Constraints: <b>{', '.join(intent.constraints) if intent.constraints else 'none'}</b></span>
       {'<span>Context: <b>' + intent.context + '</b></span>' if intent.context else ''}
+      <span>BOM: <b>{len(bom)} parts</b></span>
+      <span>Airtable: <b>{plm_result.get('parts_created',0)} parts written</b></span>
     </div>
   </div>
 
-  <div class="section">
-    <h2>Scores</h2>
-    {score_bars}
-    <p style="margin:.75rem 0 0;font-size:.85rem;color:#64748b">{evaluation.get('summary','')}</p>
+  <div class="grid">
+    <div class="section">
+      <h2>Score Radar</h2>
+      <div class="chart-wrap">
+        <canvas id="radarChart"></canvas>
+      </div>
+      <p class="summary">{evaluation.get('summary','')}</p>
+    </div>
+
+    <div class="section">
+      <h2>Optimization Journey</h2>
+      <div class="chart-wrap">
+        <canvas id="journeyChart"></canvas>
+      </div>
+      {'<p class="summary">Single iteration — no journey to show.</p>' if not show_journey == "true" else ''}
+    </div>
   </div>
 
-  <div class="section">
+  <div class="section full">
     <h2>Issues</h2>
     {issue_html}
   </div>
 
-  <div class="section">
-    <h2>Selected Configuration</h2>
-    <table><tr><th>Feature</th><th>Selected Option</th></tr>{cfg_rows}</table>
+  <div class="grid">
+    <div class="section">
+      <h2>Selected Configuration</h2>
+      <table><tr><th>Feature</th><th>Option</th></tr>{cfg_rows}</table>
+    </div>
+
+    <div class="section">
+      <h2>Product Variants</h2>
+      {variant_html}
+    </div>
   </div>
 
-  <div class="section">
+  <div class="section full">
     <h2>Bill of Materials ({len(bom)} parts)</h2>
     <table>
       <tr><th>Part No.</th><th>Name</th><th>Category</th><th>Qty</th></tr>
       {bom_rows}
     </table>
-    <div class="meta" style="margin-top:.75rem">
-      <span>Airtable: <b>{plm_result.get('parts_created',0)} parts + {plm_result.get('bom_created',0)} BOM entries</b></span>
-      <span>CAD: <b>{cad_result.get('status','skipped')}</b></span>
-    </div>
+    <button class="btn" onclick="downloadCSV()">Export BOM as CSV</button>
   </div>
 
   {img_html}
 
-  <div class="section">
-    <h2>Product Variants</h2>
-    {variant_html}
-  </div>
-
 </div>
+
+<script>
+// ── Radar chart ──────────────────────────────────────────────
+new Chart(document.getElementById('radarChart'), {{
+  type: 'radar',
+  data: {{
+    labels: {radar_labels},
+    datasets: [{{
+      label: 'Final Scores',
+      data: {radar_data},
+      backgroundColor: 'rgba(99,102,241,0.15)',
+      borderColor: '#6366f1',
+      borderWidth: 2,
+      pointBackgroundColor: '#6366f1',
+      pointRadius: 4,
+    }}]
+  }},
+  options: {{
+    responsive: true,
+    maintainAspectRatio: false,
+    scales: {{ r: {{ min:0, max:10, ticks: {{ stepSize:2, font:{{size:10}} }},
+      pointLabels: {{ font:{{size:11}} }} }} }},
+    plugins: {{ legend: {{ display: false }} }}
+  }}
+}});
+
+// ── Journey line chart ────────────────────────────────────────
+const journeyCtx = document.getElementById('journeyChart');
+if ({show_journey}) {{
+  new Chart(journeyCtx, {{
+    type: 'line',
+    data: {{
+      labels: {journey_labels},
+      datasets: {journey_datasets_json}
+    }},
+    options: {{
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {{
+        y: {{ min:0, max:10, ticks:{{ stepSize:2 }} }},
+        x: {{ grid:{{ display:false }} }}
+      }},
+      plugins: {{ legend: {{ position:'bottom', labels:{{ boxWidth:10, font:{{size:10}} }} }} }}
+    }}
+  }});
+}} else {{
+  journeyCtx.style.display = 'none';
+}}
+
+// ── CSV export ────────────────────────────────────────────────
+function downloadCSV() {{
+  const csv = `{csv_data}`;
+  const a   = document.createElement('a');
+  a.href    = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = '{f_info.get("name","bom").replace(" ","_")}_bom.csv';
+  a.click();
+}}
+</script>
 </body>
 </html>"""
 
