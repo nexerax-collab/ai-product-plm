@@ -1911,17 +1911,52 @@ def ask_intent(family: dict) -> Intent:
 
     # ── Variant picker ────────────────────────────────────────
     goal = ""
+    constraints_preset: list[str] = []
     if variants:
-        print(f"\nStart from a predefined variant, or define custom intent?\n")
+        print(f"\nHow do you want to proceed?\n")
+        print(f"  0  Auto — let the system recommend the best starting point")
         for i, v in enumerate(variants, 1):
             cfg_str = ", ".join(f"{k}={val}" for k, val in list(v.get("configuration", {}).items())[:3])
             print(f"  {i}  {v['name']} — {v.get('description', '')}  [{cfg_str}]")
         print(f"  {len(variants)+1}  Custom (type your own goal)")
         print()
-        pick = input(f"  Choose [1-{len(variants)+1}]: ").strip()
-        if pick.isdigit() and 1 <= int(pick) <= len(variants):
-            chosen  = variants[int(pick) - 1]
-            goal    = f"{chosen['name']}: {chosen.get('description', '')}"
+        pick = input(f"  Choose [0-{len(variants)+1}]: ").strip()
+
+        if pick == "0":
+            # Claude reads the family and recommends the best intent
+            print("\n  Analysing product family to recommend best intent...")
+            auto_prompt = f"""
+You are a product strategist. Given this product family, recommend the single most
+compelling and balanced design intent — the one that would create the best product
+for the broadest real-world use case.
+
+Product family:
+{json.dumps({"family": family.get("family"), "features": family.get("features"),
+             "options": family.get("options"), "constraints": family.get("constraints"),
+             "variants": family.get("variants"), "scoring_dimensions": family.get("scoring_dimensions")}, indent=2)}
+
+Return a JSON object:
+{{
+  "goal": "concise goal statement, e.g. 'maximum range with balanced cost'",
+  "constraints": ["hard constraint 1", "hard constraint 2"],
+  "reasoning": "one sentence explaining why this is the best starting point"
+}}
+
+Output JSON only.
+""".strip()
+            raw  = call_claude(auto_prompt,
+                               system="You are a product strategist. Output JSON only.",
+                               max_tokens=512)
+            rec  = extract_json(raw)
+            goal              = rec.get("goal", "")
+            constraints_preset = rec.get("constraints", [])
+            print(f"\n  Recommended goal       : {goal}")
+            print(f"  Recommended constraints: {constraints_preset}")
+            print(f"  Reasoning              : {rec.get('reasoning', '')}")
+
+        elif pick.isdigit() and 1 <= int(pick) <= len(variants):
+            chosen = variants[int(pick) - 1]
+            goal   = f"{chosen['name']}: {chosen.get('description', '')}"
             print(f"\n  Starting from: {chosen['name']}")
 
     if not goal:
@@ -1938,7 +1973,12 @@ def ask_intent(family: dict) -> Intent:
 Hard constraints — things that must never be violated.
 Enter one per line. Press Enter on an empty line when done.
 """)
-    constraints = []
+    constraints = list(constraints_preset)
+    if constraints:
+        print(f"  (pre-filled from recommendation:)")
+        for c in constraints:
+            print(f"    • {c}")
+        print()
     while True:
         c = input(f"  Constraint {len(constraints)+1} (or Enter to finish): ").strip()
         if not c:
