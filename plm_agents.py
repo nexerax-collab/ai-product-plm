@@ -14,7 +14,7 @@ Architecture:
 Setup:
   1. Copy .env.example to .env and fill in your API keys.
   2. pip install -r requirements.txt
-  3. python drone_plm_agents.py
+  3. python plm_agents.py
 """
 
 import json
@@ -366,7 +366,7 @@ Return exactly this JSON structure:
 Rules:
 - 5-10 features, 2-6 options per enum feature, 3-6 constraints, 2-3 variants.
 - scoring_dimensions: exactly 3 dimensions that matter most for this product type.
-  Examples for a bicycle: range_km, comfort, cost. For a drone: flight_time, agility, cost.
+  Examples for a bicycle: range_km, comfort, cost. For a camera: image_quality, portability, cost.
 - All options must be real-world, specific values (not vague like "good battery").
 - Variants must each satisfy all constraints.
 - Output JSON only, no markdown outside the block.
@@ -1470,7 +1470,7 @@ What product do you want to design?
 
 Examples:
   - electric mountain bike
-  - professional drone for aerial photography
+  - professional inspection robot
   - espresso machine for home use
   - industrial inspection robot
   - portable solar power station

@@ -22,8 +22,8 @@ Powered by Claude claude-sonnet-4-6 / Opus 4.6 and connected to Airtable for PLM
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/nexerax-collab/ai-product-plm.git
-cd ai-product-plm
+git clone https://github.com/config-collab/ai-product-agents.git
+cd ai-product-agents
 pip install -r requirements.txt
 ```
 
@@ -61,7 +61,7 @@ Create a base with these tables:
 ### 4. Run
 
 ```bash
-python drone_plm_agents.py
+python plm_agents.py
 ```
 
 You will be prompted for:
