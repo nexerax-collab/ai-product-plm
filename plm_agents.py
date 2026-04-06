@@ -219,6 +219,22 @@ def call_claude(prompt: str, system: str = "",
     return ""
 
 
+def _clean_json_text(text: str) -> str:
+    """
+    Light pre-processing to fix common Claude JSON mistakes:
+    - Strip // line comments
+    - Strip /* block comments */
+    - Remove trailing commas before } or ]
+    """
+    # Remove // line comments (not inside strings — good-enough heuristic)
+    text = re.sub(r'//[^\n"]*\n', '\n', text)
+    # Remove /* ... */ block comments
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+    # Remove trailing commas before closing brace/bracket
+    text = re.sub(r',\s*([}\]])', r'\1', text)
+    return text
+
+
 def extract_json(text: str) -> dict | list:
     """Extract the first JSON object or array from a Claude reply."""
     if not text or not text.strip():
@@ -227,7 +243,8 @@ def extract_json(text: str) -> dict | list:
     # Prefer fenced ```json ... ``` block
     match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\}|\[[\s\S]*?\])\s*```", text)
     if match:
-        return json.loads(match.group(1))
+        candidate = _clean_json_text(match.group(1))
+        return json.loads(candidate)
 
     # Fallback: find outermost braces/brackets
     brace   = text.find("{")
@@ -249,7 +266,8 @@ def extract_json(text: str) -> dict | list:
         print(f"\n  ⚠ Malformed JSON in response:\n{text[:400]}")
         raise ValueError("Malformed JSON in Claude response")
 
-    return json.loads(text[start:end])
+    candidate = _clean_json_text(text[start:end])
+    return json.loads(candidate)
 
 
 def separator(title: str):
@@ -783,18 +801,23 @@ Rules:
 - Output JSON only.
 """.strip()
 
-    system = "You are a product design optimizer. Output JSON only."
-    for attempt in range(1, 3):
-        raw = call_claude(prompt, system=system, max_tokens=3000, cache_system=True)
+    system = "You are a product design optimizer. Output JSON only. No comments, no trailing text."
+    for attempt in range(1, 4):
+        raw = call_claude(prompt, system=system, max_tokens=4096, cache_system=True)
         try:
             result = extract_json(raw)
             break
         except Exception as e:
-            if attempt == 1:
-                print(f"  ⚠ Optimizer JSON parse error — retrying...")
-                prompt += "\n\nIMPORTANT: Output ONLY the JSON object. No prose, no markdown, no trailing text."
+            if attempt < 3:
+                print(f"  ⚠ Optimizer JSON parse error (attempt {attempt}) — retrying...")
+                prompt += (
+                    "\n\nCRITICAL: Your last response contained invalid JSON. "
+                    "Output ONLY a valid JSON object. No comments (// or /* */), "
+                    "no trailing commas, no prose before or after the JSON. "
+                    "Keep BOM part names short (under 40 chars). "
+                    "Keep changes list to 5 items max.")
             else:
-                raise RuntimeError(f"Optimizer failed to return valid JSON: {e}") from e
+                raise RuntimeError(f"Optimizer failed to return valid JSON after 3 attempts: {e}") from e
     result["_intent"] = config.get("_intent")  # carry intent forward
     result["_family"] = config.get("_family")  # carry family forward
 
