@@ -1,10 +1,10 @@
 # AI Product PLM Agent
 
-A multi-agent system for AI-driven product configuration, bill of materials generation, and CAD model creation.
+A multi-agent system for AI-driven product configuration, bill of materials generation, and optional CAD model creation — for **any product type**.
 
 **Pipeline:**
 ```
-Product Idea
+Product Idea  (you type: "electric mountain bike", "inspection drone", etc.)
   → Product Family Agent   — defines features, options, constraints, variants
   → Configurator Agent     — selects a valid configuration and builds a BOM
   → Evaluator Agent        — scores the design across product-specific dimensions
@@ -13,29 +13,27 @@ Product Idea
   → CAD Agent (optional)   — generates a parametric 3D model in Onshape
 ```
 
-Works for any product type — drones, bicycles, espresso machines, robots, etc.
+Powered by Claude claude-sonnet-4-6 / Opus 4.6 and connected to Airtable for PLM data and Onshape for CAD.
 
 ---
 
 ## Setup
 
-### 1. Clone and install dependencies
+### 1. Clone and install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
-cd YOUR_REPO
+git clone https://github.com/nexerax-collab/ai-product-plm.git
+cd ai-product-plm
 pip install -r requirements.txt
 ```
 
 ### 2. Configure API keys
 
-Copy the example file and fill in your keys:
-
 ```bash
 cp .env.example .env
 ```
 
-Open `.env` and set:
+Open `.env` and fill in:
 
 | Variable | Where to get it |
 |---|---|
@@ -45,9 +43,9 @@ Open `.env` and set:
 | `ONSHAPE_ACCESS_KEY` / `ONSHAPE_SECRET_KEY` | [dev-portal.onshape.com/keys](https://dev-portal.onshape.com/keys) _(CAD only)_ |
 | `ONSHAPE_DID` / `ONSHAPE_WID` / `ONSHAPE_EID` | Your Onshape document URL _(CAD only)_ |
 
-Onshape keys are optional — the system works without them if you skip the CAD step.
+Onshape keys are optional — skip the CAD step and the rest of the pipeline works fine.
 
-### 3. Airtable setup
+### 3. Airtable base structure
 
 Create a base with these tables:
 
@@ -67,29 +65,47 @@ python drone_plm_agents.py
 ```
 
 You will be prompted for:
-1. **Product idea** — e.g. `electric mountain bike`, `inspection drone`, `espresso machine`
-2. **Design intent** — goal, constraints, and context (shown after the product family is defined)
+1. **Product idea** — anything: `inspection drone`, `electric mountain bike`, `espresso machine`
+2. **Design intent** — your goal and hard constraints, shown after the product family is generated
 
 ---
 
-## Models used
+## How it works
 
-| Agent | Model | Reason |
-|---|---|---|
-| Product Family, Configurator, Evaluator, Optimizer, PLM | `claude-sonnet-4-6` | Fast, cost-efficient |
-| CAD reasoning | `claude-opus-4-6` with extended thinking | Complex spatial planning |
+### Product Family Agent
+Takes your product idea and defines a structured feature model — like Configit or pure::variants. Returns features (enum/boolean/numeric), options per feature, cross-feature constraints, 2–3 predefined variants, and the scoring dimensions used by the evaluator.
+
+### Configurator Agent
+Uses the family definition to select a valid configuration and generate a realistic BOM with part numbers, names, categories, and quantities.
+
+### Evaluator + Optimizer loop
+Scores the configuration against the product-specific dimensions (e.g. `range_km`, `trail_performance`, `cost` for an e-bike). Runs up to 5 iterations, stopping when the primary metric hits ≥ 8/10 with no critical issues.
+
+### PLM Agent
+Writes all parts and BOM entries to Airtable in batched requests.
+
+### CAD Agent _(drone-specific)_
+Generates a parametric drone model in Onshape using the onshape-mcp library. Prompted after PLM — you choose whether to run it.
 
 ---
 
-## Architecture notes
+## Models
 
-- **Product-agnostic:** the evaluator and optimizer derive scoring dimensions from the product family, not hardcoded drone metrics.
-- **CAD is drone-specific:** the CAD agent generates drone geometry. Extending it to other products requires a new geometry planner.
-- **Last design is cached** in `.last_bom.json` (gitignored). On next run you can skip straight to CAD.
-- **Prompt caching** is used on the evaluator and optimizer system prompts to reduce API costs in long optimization loops.
+| Agent | Model |
+|---|---|
+| Product Family, Configurator, Evaluator, Optimizer, PLM | `claude-sonnet-4-6` |
+| CAD planning | `claude-opus-4-6` with extended thinking |
 
 ---
 
-## Environment variables reference
+## Notes
+
+- **Product-agnostic** except for CAD — evaluator/optimizer dimensions come from the product family, not hardcoded logic.
+- **Last design cached** in `.last_bom.json` (gitignored) — next run offers to skip straight to CAD.
+- **Prompt caching** on evaluator/optimizer system prompts cuts API cost in long optimization loops.
+
+---
+
+## Environment variables
 
 See [`.env.example`](.env.example) for the full list with descriptions.
