@@ -40,9 +40,10 @@ AIRTABLE_TOKEN    = os.getenv("AIRTABLE_TOKEN",    "")
 AIRTABLE_BASE_ID  = os.getenv("AIRTABLE_BASE_ID",  "")
 OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY",    "")
 
-CLAUDE_MODEL       = "claude-opus-4-6"          # CAD reasoning (adaptive thinking)
-CLAUDE_MODEL_MID   = "claude-sonnet-4-6"        # config / eval / optimize
-MAX_ITER           = 5   # hard cap on iterations
+CLAUDE_MODEL       = "claude-opus-4-6"           # CAD reasoning (adaptive thinking)
+CLAUDE_MODEL_MID   = "claude-sonnet-4-6"         # configurator / evaluator / optimizer
+CLAUDE_MODEL_FAST  = "claude-haiku-4-5-20251001" # family + competitive (structured data, no deep reasoning)
+MAX_ITER           = 3   # hard cap on iterations (most products converge in 2-3)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -317,9 +318,12 @@ def _primary_metric(intent: Intent, family: dict | None = None) -> str:
 
 
 def should_stop(evaluation: dict, iteration: int,
-                intent: Intent | None = None, family: dict | None = None) -> bool:
+                intent: Intent | None = None, family: dict | None = None,
+                score_history: list | None = None) -> bool:
     """
-    Stop when: no critical issues AND the primary scoring dimension >= 8.
+    Stop when any of:
+    - Primary metric >= 8 and no critical issues
+    - Scores didn't improve at all vs previous iteration (diminishing returns)
     Always run at least 2 iterations.
     """
     if iteration < 2:
@@ -328,7 +332,16 @@ def should_stop(evaluation: dict, iteration: int,
         return False
     scores = evaluation.get("scores", {})
     metric = _primary_metric(intent, family)
-    return scores.get(metric, 0) >= 8
+    if scores.get(metric, 0) >= 8:
+        return True
+    # Diminishing returns: stop if no score improved since last iteration
+    if score_history and len(score_history) >= 2:
+        prev = score_history[-2]["scores"]
+        curr = score_history[-1]["scores"]
+        if all(curr.get(k, 0) <= prev.get(k, 0) for k in curr):
+            print(f"\n  ↩  No score improvement vs previous iteration — stopping early.")
+            return True
+    return False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -464,7 +477,7 @@ Rules:
 - Output JSON only, no markdown outside the block.
 """.strip()
 
-    raw        = call_claude(prompt, system=_FAMILY_SYSTEM, max_tokens=2500)
+    raw        = call_claude(prompt, system=_FAMILY_SYSTEM, max_tokens=2500, model=CLAUDE_MODEL_FAST)
     family_def = extract_json(raw)
 
     f     = family_def.get("family", {})
@@ -543,7 +556,7 @@ Rules:
 """.strip()
 
     raw = call_claude(prompt, system="You are a precise product market analyst. Output JSON only.",
-                      max_tokens=1500)
+                      max_tokens=1500, model=CLAUDE_MODEL_FAST)
     try:
         competitors = extract_json(raw)
         if not isinstance(competitors, list):
@@ -767,10 +780,14 @@ def optimizer_agent(config: dict, evaluation: dict) -> dict:
 
     intent: Intent = config.get("_intent")
     intent_block   = intent.as_prompt_block() if intent else ""
-    # Only send what the optimizer needs — skip the full feature option lists
+    # Send trimmed BOM (part_number + name only) to reduce input tokens.
+    # The optimizer rebuilds the full BOM in its output anyway.
+    bom_trimmed = [{"part_number": p.get("part_number"), "name": p.get("name"),
+                    "category": p.get("category"), "quantity": p.get("quantity", 1)}
+                   for p in config.get("bom", [])]
     config_data = {
         "configuration": config.get("configuration", {}),
-        "bom":           config.get("bom", []),
+        "bom":           bom_trimmed,
         "constraints":   config.get("constraints", []),
     }
 
@@ -1681,7 +1698,7 @@ def orchestrator(intent: Intent, family: dict, competitors: list | None = None) 
         score_history.append({"iteration": iteration,
                                "scores": dict(last_eval.get("scores", {}))})
 
-        if should_stop(last_eval, iteration, intent, family):
+        if should_stop(last_eval, iteration, intent, family, score_history):
             metric = _primary_metric(intent, family)
             scores = last_eval.get("scores", {})
             print(f"\n  ✅ Done — no critical issues, "
