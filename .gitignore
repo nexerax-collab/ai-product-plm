@@ -4,6 +4,9 @@
 
 # Last-design cache (contains BOM data, personal)
 .last_bom.json
+.last_session.json
+report_*.html
+render_*.png
 
 # Python
 __pycache__/

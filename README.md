@@ -77,10 +77,24 @@ Create a base with these tables:
 | **Parts** | part_number, name, category, active |
 | **BOM** | parent, part_number (linked), quantity, level, notes |
 
-### 4. Run
+### 4. Verify setup
+
+```bash
+python plm_agents.py --setup
+```
+
+This checks your API keys and creates all required Airtable tables automatically.
+
+### 5. Run
 
 ```bash
 python plm_agents.py
+```
+
+Or skip the product idea prompt:
+
+```bash
+python plm_agents.py --idea "ergonomic standing desk"
 ```
 
 ---
@@ -97,7 +111,11 @@ python plm_agents.py
 ## Notes
 
 - **Product-agnostic** — scoring dimensions, features, and CAD geometry all come from the product family the system defines, not hardcoded rules.
-- **Last design cached** in `.last_bom.json` (gitignored) — next run offers to skip straight to CAD.
+- **Session saved** after each run (`.last_session.json`, gitignored) — next run offers CAD-only or image-only from the last design, with full family context preserved.
+- **Variant picker** — after the product family is defined, choose a predefined variant (entry-level / standard / pro) as your starting intent instead of typing from scratch.
+- **HTML report** auto-generated after each run — includes scores, BOM table, configuration, issues, and the render image if generated. Opens in your browser automatically.
+- **`--setup` flag** — verifies keys and creates Airtable tables without running the full pipeline.
+- **`--idea` flag** — skip the interactive prompt: `python plm_agents.py --idea "espresso machine"`.
 - **Prompt caching** on evaluator/optimizer system prompts cuts API cost during optimization loops.
 
 ---

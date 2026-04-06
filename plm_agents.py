@@ -1600,8 +1600,8 @@ def orchestrator(intent: Intent, family: dict) -> dict:
         }
         best_bom = config.get("bom", best_bom)
 
-    # Save BOM so the user can skip straight to CAD next run
-    _save_last_bom(best_bom)
+    # Save session (BOM + family) so the user can skip straight to CAD next run
+    _save_last_bom(best_bom, family)
 
     # Step 3 — persist to Airtable
     product_type  = family.get("family", {}).get("product_type", "Product")
@@ -1648,7 +1648,7 @@ def orchestrator(intent: Intent, family: dict) -> dict:
   Image       : {image_line}
 """)
 
-    return {
+    outcome = {
         "intent":       intent,
         "family":       family,
         "final_config": config,
@@ -1657,31 +1657,215 @@ def orchestrator(intent: Intent, family: dict) -> dict:
         "cad_result":   cad_result,
         "image_result": image_result,
     }
+    _save_html_report(outcome)
+    return outcome
 
 
 # ─────────────────────────────────────────────────────────────
-# LAST-DESIGN PERSISTENCE
+# SESSION PERSISTENCE  (BOM + family saved together)
 # ─────────────────────────────────────────────────────────────
 
-_LAST_BOM_FILE = os.path.join(os.path.dirname(__file__), ".last_bom.json")
+_LAST_SESSION_FILE = os.path.join(os.path.dirname(__file__), ".last_session.json")
+_LAST_BOM_FILE     = os.path.join(os.path.dirname(__file__), ".last_bom.json")  # legacy
 
 
-def _save_last_bom(bom: list) -> None:
+def _save_last_bom(bom: list, family: dict | None = None) -> None:
     try:
-        with open(_LAST_BOM_FILE, "w") as f:
-            json.dump(bom, f, indent=2)
+        with open(_LAST_SESSION_FILE, "w") as f:
+            json.dump({"bom": bom, "family": family or {}}, f, indent=2)
     except Exception as e:
-        print(f"  ⚠ Could not save last BOM: {e}")
+        print(f"  ⚠ Could not save session: {e}")
 
 
-def _load_last_bom() -> list | None:
-    if not os.path.exists(_LAST_BOM_FILE):
-        return None
+def _load_last_session() -> tuple[list | None, dict | None]:
+    """Returns (bom, family). Falls back to legacy .last_bom.json if needed."""
+    for path in [_LAST_SESSION_FILE, _LAST_BOM_FILE]:
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            if isinstance(data, list):          # legacy format
+                return data, None
+            return data.get("bom"), data.get("family")
+        except Exception:
+            continue
+    return None, None
+
+
+# ─────────────────────────────────────────────────────────────
+# HTML REPORT
+# ─────────────────────────────────────────────────────────────
+
+def _save_html_report(outcome: dict) -> None:
+    """Generate and save a self-contained HTML report. Opens in browser."""
+    import time as _time, base64 as _b64, webbrowser as _wb
+
+    intent      = outcome["intent"]
+    family      = outcome["family"]
+    config      = outcome["final_config"]
+    evaluation  = outcome["evaluation"]
+    plm_result  = outcome["plm_result"]
+    cad_result  = outcome["cad_result"]
+    image_result= outcome["image_result"]
+
+    f_info      = family.get("family", {})
+    scores      = evaluation.get("scores", {})
+    issues      = evaluation.get("issues", [])
+    bom         = config.get("bom", [])
+    variants    = family.get("variants", [])
+    dims        = family.get("scoring_dimensions", [])
+    configuration = config.get("configuration", {})
+
+    # Score bars
+    score_bars = ""
+    for dim in dims:
+        name = dim["name"]
+        val  = scores.get(name, 0)
+        pct  = val * 10
+        color = "#22c55e" if val >= 8 else "#f59e0b" if val >= 5 else "#ef4444"
+        score_bars += f"""
+        <div class="score-row">
+          <span class="score-label">{name}</span>
+          <div class="score-bar-bg">
+            <div class="score-bar" style="width:{pct}%;background:{color}"></div>
+          </div>
+          <span class="score-val">{val}/10</span>
+        </div>"""
+
+    # BOM table rows
+    bom_rows = "".join(
+        f"<tr><td>{p.get('part_number','')}</td><td>{p.get('name','')}</td>"
+        f"<td>{p.get('category','')}</td><td>{p.get('quantity',1)}</td></tr>"
+        for p in bom
+    )
+
+    # Configuration rows
+    cfg_rows = "".join(
+        f"<tr><td>{k}</td><td>{v}</td></tr>"
+        for k, v in configuration.items()
+    )
+
+    # Issues
+    issue_html = ""
+    for iss in issues:
+        cls  = "critical" if iss.get("type") == "critical" else "normal"
+        icon = "⚠" if cls == "critical" else "•"
+        issue_html += f'<div class="issue {cls}">{icon} {iss.get("text","")}</div>'
+    if not issue_html:
+        issue_html = '<div class="issue ok">No critical issues</div>'
+
+    # Variants
+    variant_html = ""
+    for v in variants:
+        cfg_preview = ", ".join(f"{k}={val}" for k, val in list(v.get("configuration", {}).items())[:4])
+        variant_html += f"<div class='variant'><strong>{v['name']}</strong> — {v.get('description','')} <br><small>{cfg_preview}</small></div>"
+
+    # Image embed
+    img_html = ""
+    img_file = image_result.get("file")
+    if img_file and os.path.exists(img_file):
+        with open(img_file, "rb") as fh:
+            b64 = _b64.b64encode(fh.read()).decode()
+        img_html = f'<div class="section"><h2>Product Render</h2><img src="data:image/png;base64,{b64}" style="max-width:100%;border-radius:8px;"></div>'
+
+    timestamp = _time.strftime("%Y-%m-%d %H:%M")
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>{f_info.get('name','Product')} — Design Report</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; margin: 0; background: #f8fafc; color: #1e293b; }}
+  .header {{ background: linear-gradient(135deg,#1e293b,#334155); color: white; padding: 2rem; }}
+  .header h1 {{ margin: 0 0 .4rem; font-size: 1.8rem; }}
+  .header p  {{ margin: 0; opacity: .7; }}
+  .body {{ max-width: 960px; margin: 2rem auto; padding: 0 1rem; }}
+  .section {{ background: white; border-radius: 10px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 4px rgba(0,0,0,.07); }}
+  h2 {{ margin: 0 0 1rem; font-size: 1.1rem; color: #475569; text-transform: uppercase; letter-spacing: .05em; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: .9rem; }}
+  th {{ background: #f1f5f9; text-align: left; padding: .5rem .75rem; }}
+  td {{ padding: .45rem .75rem; border-bottom: 1px solid #f1f5f9; }}
+  .score-row {{ display:flex; align-items:center; margin-bottom:.6rem; gap:.75rem; }}
+  .score-label {{ width:200px; font-size:.85rem; color:#64748b; }}
+  .score-bar-bg {{ flex:1; background:#e2e8f0; border-radius:4px; height:12px; }}
+  .score-bar {{ height:12px; border-radius:4px; transition:width .3s; }}
+  .score-val {{ width:40px; font-weight:600; font-size:.85rem; }}
+  .issue {{ padding:.4rem .75rem; margin-bottom:.4rem; border-radius:6px; font-size:.9rem; }}
+  .issue.critical {{ background:#fef2f2; color:#991b1b; }}
+  .issue.normal   {{ background:#fffbeb; color:#92400e; }}
+  .issue.ok       {{ background:#f0fdf4; color:#166534; }}
+  .variant {{ background:#f8fafc; border-left:3px solid #6366f1; padding:.6rem 1rem; margin-bottom:.6rem; border-radius:0 6px 6px 0; font-size:.9rem; }}
+  .meta {{ display:flex; gap:1.5rem; flex-wrap:wrap; font-size:.85rem; color:#64748b; margin-top:.5rem; }}
+  .meta span b {{ color:#1e293b; }}
+  .badge {{ display:inline-block; background:#e0e7ff; color:#3730a3; padding:.2rem .6rem; border-radius:999px; font-size:.75rem; margin-right:.3rem; }}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>{f_info.get('name','Product')} — Design Report</h1>
+  <p>{f_info.get('description','')} &nbsp;·&nbsp; Generated {timestamp}</p>
+</div>
+<div class="body">
+
+  <div class="section">
+    <h2>Design Goal</h2>
+    <p style="font-size:1.1rem;margin:0 0 .5rem"><strong>{intent.goal}</strong></p>
+    <div class="meta">
+      <span>Constraints: <b>{', '.join(intent.constraints) if intent.constraints else 'none'}</b></span>
+      {'<span>Context: <b>' + intent.context + '</b></span>' if intent.context else ''}
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Scores</h2>
+    {score_bars}
+    <p style="margin:.75rem 0 0;font-size:.85rem;color:#64748b">{evaluation.get('summary','')}</p>
+  </div>
+
+  <div class="section">
+    <h2>Issues</h2>
+    {issue_html}
+  </div>
+
+  <div class="section">
+    <h2>Selected Configuration</h2>
+    <table><tr><th>Feature</th><th>Selected Option</th></tr>{cfg_rows}</table>
+  </div>
+
+  <div class="section">
+    <h2>Bill of Materials ({len(bom)} parts)</h2>
+    <table>
+      <tr><th>Part No.</th><th>Name</th><th>Category</th><th>Qty</th></tr>
+      {bom_rows}
+    </table>
+    <div class="meta" style="margin-top:.75rem">
+      <span>Airtable: <b>{plm_result.get('parts_created',0)} parts + {plm_result.get('bom_created',0)} BOM entries</b></span>
+      <span>CAD: <b>{cad_result.get('status','skipped')}</b></span>
+    </div>
+  </div>
+
+  {img_html}
+
+  <div class="section">
+    <h2>Product Variants</h2>
+    {variant_html}
+  </div>
+
+</div>
+</body>
+</html>"""
+
+    ts       = _time.strftime("%Y%m%d_%H%M%S")
+    filename = os.path.join(os.path.dirname(__file__), f"report_{ts}.html")
+    with open(filename, "w", encoding="utf-8") as fh:
+        fh.write(html)
+    separator("REPORT")
+    print(f"  Saved → {filename}")
     try:
-        with open(_LAST_BOM_FILE) as f:
-            return json.load(f)
+        _wb.open(f"file:///{filename.replace(os.sep, '/')}")
     except Exception:
-        return None
+        pass
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1720,24 +1904,31 @@ def ask_intent(family: dict) -> Intent:
     print(f"  DEFINE YOUR INTENT  —  {f.get('name', '')}")
     print("═"*60)
 
-    # Show scoring dimensions as goal guidance
     if dims:
         print("\nThis product is evaluated on:")
         for d in dims:
             print(f"  • {d['name']}: {d['description']}")
 
-    # Show variants as goal examples
+    # ── Variant picker ────────────────────────────────────────
+    goal = ""
     if variants:
-        print("\nPredefined variants (you can use these as a starting point or go custom):")
-        for v in variants:
-            cfg = v.get("configuration", {})
-            cfg_str = ", ".join(f"{k}={val}" for k, val in list(cfg.items())[:3])
-            print(f"  • {v['name']}: {v.get('description', '')}  [{cfg_str}]")
+        print(f"\nStart from a predefined variant, or define custom intent?\n")
+        for i, v in enumerate(variants, 1):
+            cfg_str = ", ".join(f"{k}={val}" for k, val in list(v.get("configuration", {}).items())[:3])
+            print(f"  {i}  {v['name']} — {v.get('description', '')}  [{cfg_str}]")
+        print(f"  {len(variants)+1}  Custom (type your own goal)")
+        print()
+        pick = input(f"  Choose [1-{len(variants)+1}]: ").strip()
+        if pick.isdigit() and 1 <= int(pick) <= len(variants):
+            chosen  = variants[int(pick) - 1]
+            goal    = f"{chosen['name']}: {chosen.get('description', '')}"
+            print(f"\n  Starting from: {chosen['name']}")
 
-    print()
-    goal = input("  Your goal (what to optimise for): ").strip()
-    while not goal:
-        goal = input("  (required) Your goal: ").strip()
+    if not goal:
+        print()
+        goal = input("  Your goal (what to optimise for): ").strip()
+        while not goal:
+            goal = input("  (required) Your goal: ").strip()
 
     # Show key features as constraint hints
     if features:
@@ -1768,34 +1959,57 @@ Enter one per line. Press Enter on an empty line when done.
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="AI Product Agents")
+    parser.add_argument("--setup", action="store_true",
+                        help="Verify config and create Airtable tables, then exit")
+    parser.add_argument("--idea",  type=str, default="",
+                        help="Product idea (skips the interactive prompt)")
+    args = parser.parse_args()
+
     _check_config()
     setup_airtable()
-    last_bom = _load_last_bom()
+
+    if args.setup:
+        print("\n  Setup complete. You are ready to run: python plm_agents.py")
+        raise SystemExit(0)
+
+    last_bom, last_family = _load_last_session()
 
     if last_bom:
         print("\n" + "═"*60)
-        print("  AI PRODUCT PLM AGENT")
+        print("  AI PRODUCT AGENTS")
         print("═"*60)
-        print(f"\n  Last design found — {len(last_bom)} parts")
+        family_name = (last_family or {}).get("family", {}).get("name", "")
+        print(f"\n  Last design found — {len(last_bom)} parts"
+              + (f"  ({family_name})" if family_name else ""))
         for p in last_bom[:5]:
             print(f"    • {p.get('part_number')}  {p.get('name')}")
         if len(last_bom) > 5:
             print(f"    ... and {len(last_bom)-5} more")
         print("""
   Options:
-    1  Full pipeline  (product idea → family → configure → evaluate → optimise → Airtable → CAD)
-    2  CAD only       (skip to Onshape with the last design)
+    1  Full pipeline   (new product idea → family → configure → evaluate → optimise → report)
+    2  CAD only        (Onshape 3D model from last design)
+    3  Image only      (DALL-E 3 render from last design)
 """)
-        choice = input("  Choose [1/2]: ").strip()
+        choice = input("  Choose [1/2/3]: ").strip()
     else:
         choice = "1"
 
     if choice == "2" and last_bom:
         separator("CAD ONLY — using last design")
-        # No family available when jumping straight to CAD — Claude infers product type from BOM
-        cad_agent(last_bom, family=None)
+        cad_agent(last_bom, family=last_family)
+    elif choice == "3" and last_bom:
+        separator("IMAGE ONLY — using last design")
+        if not last_family:
+            print("  ⚠ No family context saved — using BOM names only for image prompt.")
+            last_family = {"family": {"name": "Product", "product_type": "product"},
+                           "scoring_dimensions": [], "variants": []}
+        fake_intent = Intent(goal="product render", constraints=[])
+        image_agent(last_bom, last_family, fake_intent)
     else:
-        product_idea = ask_product_idea()
+        product_idea = args.idea or ask_product_idea()
         family       = product_family_agent(product_idea)
         intent       = ask_intent(family)
         orchestrator(intent, family)
