@@ -1795,7 +1795,274 @@ def orchestrator(intent: Intent, family: dict, competitors: list | None = None) 
         "image_result":  image_result,
     }
     _save_html_report(outcome)
+
+    # Step 6 — requirements document
+    rm_data = requirements_agent(intent, family, config, last_eval)
+    _save_rm_document(rm_data, outcome)
+
     return outcome
+
+
+# ─────────────────────────────────────────────────────────────
+# REQUIREMENTS AGENT
+# ─────────────────────────────────────────────────────────────
+
+def requirements_agent(intent: Intent, family: dict,
+                       config: dict, evaluation: dict) -> dict:
+    """
+    Derive a structured requirements document from the design outcome.
+
+    Returns:
+    {
+      "stakeholder_requirements": [
+        {"id": "SR-001", "text": "...", "priority": "shall|should|may",
+         "source": "intent goal|constraint|context"}
+      ],
+      "system_requirements": [
+        {"id": "SYS-001", "text": "...", "category": "functional|performance|interface|environmental",
+         "priority": "shall|should|may", "derived_from": "SR-001"}
+      ],
+      "verification": [
+        {"req_id": "SYS-001", "method": "test|analysis|inspection|demonstration",
+         "acceptance_criteria": "..."}
+      ],
+      "traceability": [
+        {"req_id": "SYS-001", "bom_parts": ["PN-001"]}
+      ]
+    }
+    """
+    separator("REQUIREMENTS AGENT")
+
+    f_info       = family.get("family", {})
+    dims         = family.get("scoring_dimensions", [])
+    constraints  = family.get("constraints", [])
+    bom          = config.get("bom", [])
+    scores       = evaluation.get("scores", {})
+    issues       = [i for i in evaluation.get("issues", []) if i.get("type") == "critical"]
+
+    bom_summary  = [{"part_number": p.get("part_number"), "name": p.get("name"),
+                     "category": p.get("category")} for p in bom]
+
+    prompt = f"""
+You are a systems engineer generating a concise, traceable requirements document.
+Derive requirements from the following product design outcome.
+
+Product      : {f_info.get('name')} ({f_info.get('product_type')})
+Description  : {f_info.get('description', '')}
+
+Design intent:
+  Goal        : {intent.goal}
+  Constraints : {intent.constraints}
+  Context     : {intent.context or 'none'}
+
+Family constraints (rules): {json.dumps(constraints)}
+
+Scoring dimensions (what was optimised):
+{json.dumps([{{"name": d["name"], "description": d["description"],
+               "final_score": scores.get(d["name"], "n/a")}} for d in dims], indent=2)}
+
+Final BOM ({len(bom)} parts):
+{json.dumps(bom_summary, indent=2)}
+
+Unresolved critical issues: {json.dumps([i["text"] for i in issues]) if issues else "none"}
+
+Generate a requirements document with these four sections:
+
+1. stakeholder_requirements — 4-8 high-level "shall" statements derived from the intent goal,
+   constraints and context. Each must be testable and unambiguous.
+
+2. system_requirements — 8-15 lower-level requirements derived from the family constraints,
+   scoring dimensions and BOM. Categorise each as functional / performance / interface /
+   environmental. Each traces to a stakeholder requirement.
+
+3. verification — for every system requirement, one verification entry:
+   method (test | analysis | inspection | demonstration) and a concrete acceptance criterion.
+
+4. traceability — map each system requirement to the BOM part(s) that implement it.
+
+Return exactly this JSON structure:
+{{
+  "stakeholder_requirements": [
+    {{"id": "SR-001", "text": "...", "priority": "shall", "source": "intent goal"}}
+  ],
+  "system_requirements": [
+    {{"id": "SYS-001", "text": "...", "category": "functional",
+      "priority": "shall", "derived_from": "SR-001"}}
+  ],
+  "verification": [
+    {{"req_id": "SYS-001", "method": "test", "acceptance_criteria": "..."}}
+  ],
+  "traceability": [
+    {{"req_id": "SYS-001", "bom_parts": ["PN-001"]}}
+  ]
+}}
+
+Rules:
+- Requirements must be specific and measurable — no vague "shall be good".
+- Performance requirements must include a numeric threshold where possible.
+- Output JSON only. No markdown, no prose outside the object.
+""".strip()
+
+    raw = call_claude(prompt,
+                      system="You are a systems engineer. Output JSON only.",
+                      max_tokens=4096)
+    try:
+        rm = extract_json(raw)
+    except Exception as e:
+        print(f"  ⚠ Requirements parse error: {e} — returning empty document.")
+        rm = {"stakeholder_requirements": [], "system_requirements": [],
+              "verification": [], "traceability": []}
+
+    sr  = len(rm.get("stakeholder_requirements", []))
+    sys = len(rm.get("system_requirements", []))
+    print(f"  ✓ {sr} stakeholder requirements, {sys} system requirements")
+    print(f"  ✓ {len(rm.get('verification', []))} verification entries")
+    return rm
+
+
+def _save_rm_document(rm: dict, outcome: dict) -> None:
+    """Render the requirements document as a styled HTML file."""
+    import time as _time, webbrowser as _wb
+
+    intent   = outcome["intent"]
+    family   = outcome["family"]
+    f_info   = family.get("family", {})
+    timestamp = _time.strftime("%Y-%m-%d %H:%M")
+
+    sr_list  = rm.get("stakeholder_requirements", [])
+    sys_list = rm.get("system_requirements", [])
+    ver_map  = {v["req_id"]: v for v in rm.get("verification", [])}
+    tra_map  = {t["req_id"]: t.get("bom_parts", []) for t in rm.get("traceability", [])}
+
+    # Priority badge colours
+    def badge(priority):
+        colours = {"shall": ("#1e40af", "#dbeafe"),
+                   "should": ("#92400e", "#fef3c7"),
+                   "may": ("#374151", "#f3f4f6")}
+        bg, fg = colours.get(priority, ("#374151", "#f3f4f6"))
+        return (f'<span style="background:{fg};color:{bg};padding:.15rem .5rem;'
+                f'border-radius:999px;font-size:.72rem;font-weight:600;'
+                f'text-transform:uppercase">{priority}</span>')
+
+    def cat_badge(cat):
+        colours = {"functional": "#6366f1", "performance": "#0891b2",
+                   "interface": "#059669", "environmental": "#d97706"}
+        c = colours.get(cat, "#64748b")
+        return (f'<span style="background:{c}22;color:{c};padding:.15rem .5rem;'
+                f'border-radius:4px;font-size:.72rem;font-weight:600">{cat}</span>')
+
+    # ── Stakeholder requirements table ────────────────────────
+    sr_rows = ""
+    for r in sr_list:
+        sr_rows += (f"<tr><td style='font-weight:600;color:#1e40af'>{r['id']}</td>"
+                    f"<td>{r['text']}</td>"
+                    f"<td>{badge(r.get('priority','shall'))}</td>"
+                    f"<td style='color:#64748b;font-size:.85rem'>{r.get('source','')}</td></tr>")
+
+    # ── System requirements + verification + traceability ─────
+    sys_rows = ""
+    for r in sys_list:
+        rid  = r["id"]
+        ver  = ver_map.get(rid, {})
+        parts = ", ".join(tra_map.get(rid, [])) or "—"
+        sys_rows += (
+            f"<tr>"
+            f"<td style='font-weight:600;color:#0f172a'>{rid}</td>"
+            f"<td>{r['text']}</td>"
+            f"<td>{cat_badge(r.get('category',''))}</td>"
+            f"<td>{badge(r.get('priority','shall'))}</td>"
+            f"<td style='color:#475569;font-size:.82rem'>{r.get('derived_from','')}</td>"
+            f"<td style='font-size:.82rem'><strong>{ver.get('method','')}</strong><br>"
+            f"<span style='color:#64748b'>{ver.get('acceptance_criteria','')}</span></td>"
+            f"<td style='color:#6366f1;font-size:.82rem'>{parts}</td>"
+            f"</tr>")
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Requirements — {f_info.get('name','Product')}</title>
+<style>
+  *{{box-sizing:border-box}}
+  body{{font-family:system-ui,sans-serif;margin:0;background:#f1f5f9;color:#1e293b}}
+  .header{{background:linear-gradient(135deg,#0f172a 0%,#1e3a8a 60%,#2563eb 100%);
+           color:white;padding:2.5rem 2rem 2rem}}
+  .header-brand{{font-size:.72rem;letter-spacing:.18em;text-transform:uppercase;
+                 opacity:.55;font-weight:600;margin-bottom:.6rem}}
+  .header h1{{margin:0 0 .35rem;font-size:1.8rem;font-weight:700}}
+  .header p{{margin:0;opacity:.6;font-size:.9rem}}
+  .body{{max-width:1100px;margin:2rem auto;padding:0 1rem}}
+  .section{{background:white;border-radius:12px;padding:1.5rem;
+            box-shadow:0 1px 6px rgba(0,0,0,.07);margin-bottom:1.5rem}}
+  h2{{margin:0 0 1.2rem;font-size:.78rem;color:#64748b;text-transform:uppercase;
+      letter-spacing:.1em;font-weight:600}}
+  table{{width:100%;border-collapse:collapse;font-size:.85rem}}
+  th{{background:#f8fafc;text-align:left;padding:.5rem .75rem;font-weight:600;
+      color:#475569;border-bottom:2px solid #e2e8f0;white-space:nowrap}}
+  td{{padding:.5rem .75rem;border-bottom:1px solid #f1f5f9;vertical-align:top}}
+  tr:last-child td{{border-bottom:none}}
+  tr:hover td{{background:#fafafa}}
+  .intent-block{{background:#f8fafc;border-left:3px solid #6366f1;
+                 padding:1rem 1.25rem;border-radius:0 8px 8px 0;
+                 font-size:.88rem;margin-bottom:0}}
+  .intent-block strong{{display:block;margin-bottom:.25rem;color:#1e293b}}
+  .intent-block span{{color:#475569}}
+  footer{{text-align:center;padding:2rem 1rem 3rem;font-size:.78rem;color:#94a3b8}}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="header-brand">Design to Intent</div>
+  <h1>{f_info.get('name','Product')} — Requirements</h1>
+  <p>{f_info.get('product_type','')} &nbsp;·&nbsp; {timestamp}</p>
+</div>
+<div class="body">
+
+  <div class="section">
+    <h2>Design Intent</h2>
+    <div class="intent-block">
+      <strong>Goal</strong><span>{intent.goal}</span>
+    </div>
+    <div class="intent-block" style="margin-top:.75rem">
+      <strong>Hard Constraints</strong>
+      <span>{' &nbsp;·&nbsp; '.join(intent.constraints) if intent.constraints else 'none'}</span>
+    </div>
+    {'<div class="intent-block" style="margin-top:.75rem"><strong>Context</strong><span>' + intent.context + '</span></div>' if intent.context else ''}
+  </div>
+
+  <div class="section">
+    <h2>Stakeholder Requirements ({len(sr_list)})</h2>
+    <table>
+      <tr><th>ID</th><th>Requirement</th><th>Priority</th><th>Source</th></tr>
+      {sr_rows if sr_rows else '<tr><td colspan="4" style="color:#94a3b8">No requirements generated.</td></tr>'}
+    </table>
+  </div>
+
+  <div class="section">
+    <h2>System Requirements — Verification — Traceability ({len(sys_list)})</h2>
+    <table>
+      <tr><th>ID</th><th>Requirement</th><th>Category</th><th>Priority</th>
+          <th>Derives from</th><th>Verification</th><th>BOM parts</th></tr>
+      {sys_rows if sys_rows else '<tr><td colspan="7" style="color:#94a3b8">No requirements generated.</td></tr>'}
+    </table>
+  </div>
+
+</div>
+<footer>Design to Intent &nbsp;·&nbsp; {timestamp} &nbsp;·&nbsp; {f_info.get('product_type','')}</footer>
+</body>
+</html>"""
+
+    ts       = _time.strftime("%Y%m%d_%H%M%S")
+    filename = os.path.join(os.path.dirname(__file__), f"requirements_{ts}.html")
+    with open(filename, "w", encoding="utf-8") as fh:
+        fh.write(html)
+    separator("REQUIREMENTS DOCUMENT")
+    print(f"  ✓ {len(sr_list)} stakeholder + {len(sys_list)} system requirements")
+    print(f"  Saved → {filename}")
+    try:
+        _wb.open(f"file:///{filename.replace(os.sep, '/')}")
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@
 .last_bom.json
 .last_session.json
 report_*.html
+requirements_*.html
 render_*.png
 
 # Python
