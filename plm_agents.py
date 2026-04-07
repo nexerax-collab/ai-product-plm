@@ -4,7 +4,6 @@ Design to Intent — Multi-Agent Product Design System
 Architecture:
   Product Idea
   → Product Family Agent   (defines product line: features, options, constraints, variants)
-  → Competitive Analysis   (maps real market competitors and gaps)
   → Intent Definition      (goal + constraints + context — manually or auto from market gap)
   → Configurator Agent     (selects valid configuration from family + builds BOM)
   → Evaluator Agent        (scores dimensions defined by the product family)
@@ -12,7 +11,7 @@ Architecture:
   → Builder Agent          (persists parts + BOM to Airtable)
   → CAD Agent (optional)   (maps BOM → parametric geometry → Onshape via MCP)
   → Image Agent (optional) (DALL-E 3 product render)
-  → HTML Report            (radar chart, journey chart, competitive landscape, BOM)
+  → HTML Report            (radar chart, journey chart, BOM)
 
 Setup:
   1. Copy .env.example to .env and fill in your API keys.
@@ -46,7 +45,7 @@ OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY",    "")
 
 CLAUDE_MODEL       = "claude-opus-4-6"           # CAD reasoning (adaptive thinking)
 CLAUDE_MODEL_MID   = "claude-sonnet-4-6"         # configurator / evaluator / optimizer
-CLAUDE_MODEL_FAST  = "claude-haiku-4-5-20251001" # family + competitive (structured data, no deep reasoning)
+CLAUDE_MODEL_FAST  = "claude-haiku-4-5-20251001" # family agent (structured data, no deep reasoning)
 MAX_ITER           = 3   # hard cap on iterations (most products converge in 2-3)
 
 
@@ -504,79 +503,6 @@ Rules:
 
     return family_def
 
-
-# ─────────────────────────────────────────────────────────────
-# AGENT 0b – COMPETITIVE ANALYSIS
-# ─────────────────────────────────────────────────────────────
-
-def competitive_agent(product_idea: str, family: dict) -> list[dict]:
-    """
-    Identify real market competitors and their key specs.
-
-    Returns a list of dicts:
-    [
-      {
-        "name":        "Specialized Turbo Levo",
-        "maker":       "Specialized",
-        "price_eur":   4500,
-        "highlights":  ["Brose S Mag motor", "700Wh battery", "150mm travel"],
-        "weakness":    "heavy at 23 kg",
-        "positioning": "premium trail e-MTB"
-      },
-      ...
-    ]
-    """
-    separator("COMPETITIVE ANALYSIS AGENT")
-    dims  = [d["name"] for d in family.get("scoring_dimensions", [])]
-    feats = [f["name"] for f in family.get("features", [])]
-
-    prompt = f"""
-You are a product market analyst. Identify 4-5 real, well-known competitors
-for the following product and return structured data about each.
-
-Product idea   : {product_idea}
-Key dimensions : {dims}
-Key features   : {feats}
-
-Return JSON — an array of objects, one per competitor:
-
-[
-  {{
-    "name":        "full product name",
-    "maker":       "brand / manufacturer",
-    "price_eur":   approximate price in EUR as an integer (0 if unknown),
-    "highlights":  ["3-4 specific standout specs or features"],
-    "weakness":    "one clear weakness or trade-off",
-    "positioning": "one-line market position"
-  }}
-]
-
-Rules:
-- Use real, currently available products — not invented.
-- Highlights should be specific (e.g. "250W motor, 80Nm torque") not vague ("good motor").
-- Cover a spread of price tiers if relevant.
-- If the product category is niche or emerging, name the closest available alternatives.
-- Output JSON array only, no markdown.
-""".strip()
-
-    raw = call_claude(prompt, system="You are a precise product market analyst. Output JSON only.",
-                      max_tokens=1500, model=CLAUDE_MODEL_FAST)
-    try:
-        competitors = extract_json(raw)
-        if not isinstance(competitors, list):
-            competitors = []
-    except Exception:
-        competitors = []
-
-    if competitors:
-        print(f"\n  ✓ Found {len(competitors)} competitors:")
-        for c in competitors:
-            price = f"€{c.get('price_eur', 0):,}" if c.get("price_eur") else "price n/a"
-            print(f"    • {c.get('maker')} {c.get('name')}  [{price}]  — {c.get('positioning','')}")
-    else:
-        print("  ⚠ No competitor data returned — continuing without.")
-
-    return competitors
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1666,7 +1592,7 @@ def cad_agent(bom: list, family: dict | None = None) -> dict:
 # ORCHESTRATOR
 # ─────────────────────────────────────────────────────────────
 
-def orchestrator(intent: Intent, family: dict, competitors: list | None = None) -> dict:
+def orchestrator(intent: Intent, family: dict) -> dict:
     """
     Engineering loop (family already defined before calling):
       1. Configure (once, guided by family)
@@ -1786,7 +1712,6 @@ def orchestrator(intent: Intent, family: dict, competitors: list | None = None) 
     outcome = {
         "intent":        intent,
         "family":        family,
-        "competitors":   competitors or [],
         "final_config":  config,
         "evaluation":    last_eval,
         "score_history": score_history,
@@ -2107,7 +2032,6 @@ def _save_html_report(outcome: dict) -> None:
 
     intent        = outcome["intent"]
     family        = outcome["family"]
-    competitors   = outcome.get("competitors", [])
     config        = outcome["final_config"]
     evaluation    = outcome["evaluation"]
     score_history = outcome.get("score_history", [])
@@ -2180,27 +2104,6 @@ def _save_html_report(outcome: dict) -> None:
         variant_html += (f"<div class='variant'><strong>{v['name']}</strong>"
                          f" — {v.get('description','')} <br><small>{cfg_preview}</small></div>")
 
-    # ── Competitor table ──────────────────────────────────────
-    competitor_html = ""
-    if competitors:
-        rows = ""
-        for c in competitors:
-            price = f"€{c.get('price_eur', 0):,}" if c.get("price_eur") else "—"
-            highlights = "; ".join(c.get("highlights", []))
-            rows += (f"<tr><td><strong>{c.get('maker','')}</strong><br>"
-                     f"<small style='color:#64748b'>{c.get('name','')}</small></td>"
-                     f"<td>{price}</td>"
-                     f"<td>{highlights}</td>"
-                     f"<td style='color:#ef4444'>{c.get('weakness','')}</td>"
-                     f"<td style='color:#64748b;font-style:italic'>{c.get('positioning','')}</td></tr>")
-        competitor_html = f"""
-  <div class="section full">
-    <h2>Competitive Landscape ({len(competitors)} products)</h2>
-    <table>
-      <tr><th>Product</th><th>Price</th><th>Key Specs</th><th>Weakness</th><th>Positioning</th></tr>
-      {rows}
-    </table>
-  </div>"""
 
     # ── Image embed ───────────────────────────────────────────
     img_html = ""
@@ -2310,8 +2213,6 @@ def _save_html_report(outcome: dict) -> None:
     <button class="btn" onclick="downloadCSV()">Export BOM as CSV</button>
   </div>
 
-  {competitor_html}
-
   {img_html}
 
 </div>
@@ -2417,7 +2318,7 @@ Examples:
     return idea
 
 
-def ask_intent(family: dict, competitors: list | None = None) -> Intent:
+def ask_intent(family: dict) -> Intent:
     """Ask for design intent, informed by the product family definition."""
     f        = family.get("family", {})
     dims     = family.get("scoring_dimensions", [])
@@ -2449,29 +2350,16 @@ def ask_intent(family: dict, competitors: list | None = None) -> Intent:
 
         if pick == "0":
             # Claude reads the family and recommends the best intent
-            print("\n  Analysing product family and market landscape to recommend best intent...")
-            comp_block = ""
-            if competitors:
-                lines = []
-                for c in competitors:
-                    price = f"€{c.get('price_eur', 0):,}" if c.get("price_eur") else "price unknown"
-                    highlights = "; ".join(c.get("highlights", []))
-                    lines.append(f"  - {c.get('maker')} {c.get('name')} [{price}]: {highlights}. "
-                                 f"Weakness: {c.get('weakness','')}. Position: {c.get('positioning','')}")
-                comp_block = "\n\nCurrent market competitors:\n" + "\n".join(lines) + (
-                    "\n\nUse this to recommend an intent that targets a real gap or "
-                    "meaningful differentiation — not just copying the market leader.")
-
+            print("\n  Analysing product family to recommend best intent...")
             auto_prompt = f"""
 You are a product strategist. Given this product family, recommend the single most
-compelling design intent — one that creates a differentiated, competitive product
-rather than a me-too copy of what already exists.
+compelling and balanced design intent — the one that would create the best product
+for the broadest real-world use case.
 
 Product family:
 {json.dumps({"family": family.get("family"), "features": family.get("features"),
              "options": family.get("options"), "constraints": family.get("constraints"),
              "variants": family.get("variants"), "scoring_dimensions": family.get("scoring_dimensions")}, indent=2)}
-{comp_block}
 
 Return a JSON object:
 {{
@@ -2611,7 +2499,6 @@ if __name__ == "__main__":
     else:
         product_idea = args.idea or ask_product_idea()
         family       = product_family_agent(product_idea)
-        competitors  = competitive_agent(product_idea, family)
         # Non-interactive mode when --goal is supplied (e.g. from GUI)
         if args.goal:
             constraints = [c.strip() for c in args.constraints.split(",") if c.strip()]
@@ -2621,5 +2508,5 @@ if __name__ == "__main__":
             print(f"    Constraints : {intent.constraints}")
             print(f"    Context     : {intent.context or 'none'}")
         else:
-            intent = ask_intent(family, competitors=competitors)
-        orchestrator(intent, family, competitors=competitors)
+            intent = ask_intent(family)
+        orchestrator(intent, family)

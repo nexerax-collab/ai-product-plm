@@ -1,6 +1,6 @@
 # Design to Intent
 
-AI-driven product design — from idea to optimised BOM, competitive landscape, and report.
+AI-driven product design — from idea to optimised BOM, requirements document, and report.
 
 ---
 
@@ -25,22 +25,9 @@ AI-driven product design — from idea to optimised BOM, competitive landscape, 
                                │
                                ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  COMPETITIVE ANALYSIS AGENT                                     │
-│  Identifies real market competitors using Claude's knowledge    │
-│                                                                 │
-│  → Tesla Powerwall 3   [€9,500]  — best ecosystem integration   │
-│  → Sonnen Eco          [€12,000] — premium, long warranty       │
-│  → BYD Battery-Box     [€5,800]  — value, modular expansion     │
-│  → Enphase IQ Battery  [€7,200]  — AC-coupled, easy retrofit    │
-│                                                                 │
-│  Market gap: nothing strong at €4k–6k with open protocols       │
-└──────────────────────────────┬──────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
 │  INTENT DEFINITION                                              │
 │                                                                 │
-│  Option 0: Auto — Claude recommends based on market gap         │
+│  Option 0: Auto — Claude recommends based on product family     │
 │    → Goal: "best value at under €5,000 with open BMS"           │
 │    → Constraints: ["grid-tie capable", "IP55 outdoor rating"]   │
 │    → Context: "residential installer, EU market"                │
@@ -93,7 +80,7 @@ AI-driven product design — from idea to optimised BOM, competitive landscape, 
                                ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  HTML REPORT  (auto-opens in browser)                           │
-│  Radar chart · Optimization journey · Competitive landscape     │
+│  Radar chart · Optimization journey · BOM                       │
 │  BOM table with CSV export · Configuration · Issues · Render   │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -192,7 +179,7 @@ Creates all required Airtable tables automatically and verifies your API keys.
 
 | Agent | Model | Reason |
 |---|---|---|
-| Product Family, Competitive Analysis | `claude-haiku-4-5` | Structured data generation — fast and cheap |
+| Product Family | `claude-haiku-4-5` | Structured data generation — fast and cheap |
 | Configurator, Evaluator, Optimizer | `claude-sonnet-4-6` | Reasoning quality matters here |
 | CAD planning | `claude-opus-4-6` | Extended thinking for geometry |
 | Image generation | DALL-E 3 (1792×1024 HD) | |
@@ -202,7 +189,6 @@ Creates all required Airtable tables automatically and verifies your API keys.
 ## Notes
 
 - **Product-agnostic** — scoring dimensions, features, and CAD geometry all come from the product family the system defines, not hardcoded rules. Works for any physical product.
-- **Competitive analysis** — real competitors identified before you set your intent; auto-intent uses the market gap to recommend a differentiated goal.
 - **Diminishing returns** — the optimizer loop stops early if scores don't improve iteration-over-iteration, saving API calls.
 - **Session saved** after each run — next run offers CAD-only or image-only from the last design, with full family context preserved.
 - **Fully non-interactive** — pass `--idea`, `--goal`, `--constraints`, `--context` to skip all prompts (used by the GUI).
