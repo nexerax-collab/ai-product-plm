@@ -102,6 +102,35 @@ See **[example_report.html](example_report.html)** for a full sample output.
 
 ---
 
+## A different relationship to product development
+
+Traditional product development puts requirements first:
+
+```
+Market research → Requirements → Design → Verify against requirements
+```
+
+Design to Intent inverts this. You express *what you're trying to achieve*, and the system reasons about what matters, explores the solution space, and verifies against your intent continuously — not at a gate at the end.
+
+**Your role shifts from specification writer to product strategist.** You define the goal, set the hard limits, judge the trade-offs. The agents handle the feature model, the BOM, the scoring, the iteration.
+
+**What replaces requirements management:**
+
+| Traditional RM | Design to Intent equivalent |
+|---|---|
+| Requirements document | Intent (goal + constraints + context) |
+| Feature tree / product breakdown | Product family (auto-generated) |
+| Shall statements | Scoring dimensions (measurable, 0–10) |
+| Verification matrix | Evaluation loop — continuous, not a gate |
+| BOM as output | BOM as the primary truth artifact |
+
+The constraints and scoring dimensions that emerge from the pipeline *are* a lightweight requirements spec — they just derive from reasoning about the product rather than being written upfront by a requirements engineer.
+
+**Do you still need formal requirements management?**
+For regulated industries (medical, aerospace, automotive) — yes, legal traceability obligations don't go away. For everything else — concept work, startups, innovation — intent is enough, and significantly faster.
+
+---
+
 ## Running
 
 ### CLI
