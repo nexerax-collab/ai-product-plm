@@ -704,7 +704,13 @@ Output ONLY a valid JSON object with these keys:
 
 "features"      : dict mapping feature name → list of possible options
 "configuration" : dict mapping feature name → chosen option (must satisfy all constraints)
-"constraints"   : list of constraint strings
+"constraints"   : list of abstract engineering rules that must hold
+                  (e.g. "must include WiFi module", "USB connectivity required")
+                  RULES FOR THIS FIELD:
+                  - Each entry is a technology-agnostic rule, NOT a validation statement.
+                  - Never mention the name of a selected component or option.
+                  - Never write 'X selected' or 'X satisfied by Y'.
+                  - These rules must remain valid even if the BOM changes later.
 "bom"           : list of parts, each with:
     "part_number" (unique string, e.g. "STR-001"),
     "name"        (string),
@@ -974,6 +980,9 @@ Priority order:
 Output ONLY a valid JSON object with these keys:
 "configuration": dict of feature → selected option (updated)
 "bom":           full updated parts list (same schema: part_number, name, category, quantity)
+"constraints":   updated abstract engineering rules — keep them technology-agnostic
+                 (e.g. "must include WiFi module", "BOM cost must stay under budget").
+                 NEVER write 'X selected' or name a specific component in a constraint.
 "changes":       list of short strings explaining what changed and why
 
 Current configuration:
@@ -1011,6 +1020,9 @@ Rules:
     result["_intent"]         = config.get("_intent")         # carry intent forward
     result["_family"]         = config.get("_family")         # carry family forward
     result["_domain_context"] = config.get("_domain_context") # carry domain context forward
+    # Fall back to existing constraints if optimizer didn't emit a new list
+    if not result.get("constraints"):
+        result["constraints"] = config.get("constraints", [])
 
     print(f"\n  Changes:")
     for change in result.get("changes", []):
@@ -1909,6 +1921,7 @@ def orchestrator(intent: Intent, family: dict,
             **config,
             "configuration":  optimized.get("configuration", config.get("configuration")),
             "bom":            optimized.get("bom", best_bom),
+            "constraints":    optimized.get("constraints", config.get("constraints", [])),
             "_domain_context": domain_ctx,  # ensure ctx never drops off
         }
         best_bom = config.get("bom", best_bom)

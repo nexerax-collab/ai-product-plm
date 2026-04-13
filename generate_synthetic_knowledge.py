@@ -91,7 +91,7 @@ the kind of reasoning captured in design reviews, FMEA sessions, or trade studie
 
 Return a JSON array of exactly {_BATCH_SIZE} objects. Each object:
 {{
-  "record_id":            "SK-{start_id + i:03d}",   // sequential
+  "record_id":            "SK-NNN",   // sequential starting from SK-{start_id:03d}
   "intent":               "string — what the engineer was trying to achieve",
   "constraints":          ["string", ...],  // 2-4 hard constraints that applied
   "trade_offs":           "string — what was gained vs. lost in the decision",
@@ -164,21 +164,65 @@ def _flatten_record(r: dict) -> str:
 # ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _promote_to_company(records: list[dict], product: str, slug: str) -> str:
+    """
+    Promote synthetic records to company_knowledge format.
+    Changes tag: synthetic_pending → company_sourced, confidence: plausible → synthetic.
+    Adds source_file, source_type, source_date, decisions, part_relationships fields
+    required by the domain_knowledge agent loader.
+    Returns path of saved company_knowledge file.
+    """
+    promoted = []
+    for i, r in enumerate(records, 1):
+        p = dict(r)
+        p["tag"]             = "company_sourced"
+        p["confidence"]      = "synthetic"
+        p["source_file"]     = f"synthetic_{slug}_knowledge.json"
+        p["source_type"]     = "synthetic"
+        p["source_date"]     = datetime.now().strftime("%Y-%m")
+        # Map 'decision' → 'decisions' list (ingest format)
+        if "decision" in p and "decisions" not in p:
+            p["decisions"] = [p.pop("decision")]
+        # Ensure part_relationships exists
+        p.setdefault("part_relationships", [])
+        # Keep text blob for RAG
+        p["text"] = _flatten_record(p)
+        promoted.append(p)
+
+    ck_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            f"company_knowledge_{slug}.json")
+    output = {
+        "product":      product,
+        "generated_at": datetime.now().isoformat(),
+        "model":        _MODEL,
+        "tag":          "company_sourced",
+        "total":        len(promoted),
+        "file_index":   {f"synthetic_{slug}_knowledge.json": datetime.now().strftime("%Y-%m")},
+        "records":      promoted,
+    }
+    with open(ck_path, "w", encoding="utf-8") as fh:
+        json.dump(output, fh, indent=2, ensure_ascii=False)
+    return ck_path
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate synthetic engineering knowledge")
     parser.add_argument("--product", type=str, default="",
                         help="Product name (skips interactive prompt)")
+    parser.add_argument("--promote", action="store_true",
+                        help="Also promote records to company_knowledge_{slug}.json "
+                             "(tag: company_sourced) for immediate pipeline use")
     args = parser.parse_args()
 
-    print("\n" + "═" * 60)
+    print("\n" + "=" * 60)
     print("  SYNTHETIC KNOWLEDGE GENERATOR")
-    print("═" * 60)
+    print("=" * 60)
     print("  Generates 50 synthetic engineering reasoning records.")
     print("  All records tagged 'synthetic_pending' — review before use.\n")
 
     product = args.product.strip() or input("  What product? > ").strip()
     if not product:
-        print("  ✗ No product specified.")
+        print("  No product specified.")
         sys.exit(1)
 
     slug     = _slug(product)
@@ -187,7 +231,10 @@ def main():
 
     print(f"\n  Product : {product}")
     print(f"  Output  : {out_path}")
-    print(f"  Records : {_TOTAL}\n")
+    print(f"  Records : {_TOTAL}")
+    if args.promote:
+        print(f"  Promote : yes -> company_knowledge_{slug}.json")
+    print()
 
     records = generate_synthetic_knowledge(product)
 
@@ -203,13 +250,19 @@ def main():
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(output, fh, indent=2, ensure_ascii=False)
 
-    print(f"\n  ✓ {len(records)} records saved → {out_path}")
-    print("""
+    print(f"\n  OK {len(records)} records saved -> {out_path}")
+
+    if args.promote and records:
+        ck_path = _promote_to_company(records, product, slug)
+        print(f"  OK promoted to company knowledge -> {ck_path}")
+        print(f"     Pipeline will auto-load this on next run.")
+    else:
+        print("""
   Next steps:
     1. Review records — edit or delete any that are implausible
-    2. Promote to company knowledge:  python ingest_company_knowledge.py
-    3. Or use directly by renaming:   company_knowledge_{slug}.json
-       (and changing tag from 'synthetic_pending' to 'company_sourced')
+    2. Promote for pipeline use:
+         python generate_synthetic_knowledge.py --product "..." --promote
+       or: python ingest_company_knowledge.py  (for real company files)
 """)
 
 
