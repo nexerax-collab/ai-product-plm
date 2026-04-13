@@ -36,6 +36,29 @@ import anthropic
 import requests
 
 # ─────────────────────────────────────────────────────────────
+# DOMAIN KNOWLEDGE  (RAG + KG)  — optional, graceful fallback
+# ─────────────────────────────────────────────────────────────
+try:
+    from domain_knowledge import (
+        DomainContext, get_domain_agent
+    )
+    _DOMAIN_KNOWLEDGE_AVAILABLE = True
+except ImportError as _dk_err:
+    print(f"  ⚠ domain_knowledge module unavailable: {_dk_err}")
+    _DOMAIN_KNOWLEDGE_AVAILABLE = False
+
+    class DomainContext:  # type: ignore[no-redef]
+        """Stub when domain_knowledge.py is absent."""
+        rag_chunks: list = []
+        graph_triples: list = []
+        validation_trace: dict = {}
+        def prompt_block(self) -> str: return ""
+        def is_empty(self) -> bool: return True
+        def sources_for_report(self) -> list: return []
+        def vv_coverage(self) -> dict:
+            return {"graph": 0, "rag": 0, "llm_reasoned": 0}
+
+# ─────────────────────────────────────────────────────────────
 # CONFIGURATION  —  set via .env or environment variables
 # ─────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -348,6 +371,40 @@ def should_stop(evaluation: dict, iteration: int,
 
 
 # ─────────────────────────────────────────────────────────────
+# DOMAIN KNOWLEDGE AGENT  (runs before Product Family)
+# ─────────────────────────────────────────────────────────────
+
+def domain_knowledge_agent(product_idea: str,
+                            product_type: str = "",
+                            intent_goal: str = "") -> "DomainContext":
+    """
+    Retrieve RAG chunks + KG triples relevant to this product.
+    Returns a DomainContext (empty stub if domain_knowledge unavailable).
+    Always succeeds — errors are logged, never raised.
+    """
+    separator("DOMAIN KNOWLEDGE AGENT")
+    if not _DOMAIN_KNOWLEDGE_AVAILABLE:
+        print("  ⚠ Skipped — install llama-index, chromadb, kuzu for full context")
+        return DomainContext()
+    try:
+        agent = get_domain_agent()
+        ctx   = agent.run(product_idea, product_type, intent_goal)
+        trace = ctx.validation_trace
+        print(f"  ✓ RAG     : {trace.get('rag_chunks', 0)} chunks "
+              f"({trace.get('stale_chunks', 0)} stale)")
+        print(f"  ✓ Graph   : {trace.get('graph_triples', 0)} triples "
+              f"({trace.get('sourced', 0)} sourced, "
+              f"{trace.get('llm_reasoned', 0)} llm_reasoned)")
+        if trace.get("sources"):
+            for src in trace["sources"]:
+                print(f"    • {src}")
+        return ctx
+    except Exception as e:
+        print(f"  ⚠ Domain knowledge error: {e} — continuing without context")
+        return DomainContext()
+
+
+# ─────────────────────────────────────────────────────────────
 # AGENT 0 – PRODUCT FAMILY
 # Defines the product line: features, options, constraints, variants
 # Persists to Airtable: Product Families / Features / Feature Options / Constraints
@@ -509,7 +566,8 @@ Rules:
 # AGENT 1 – CONFIGURATOR
 # ─────────────────────────────────────────────────────────────
 
-def configurator_agent(intent: Intent, family: dict | None = None) -> dict:
+def configurator_agent(intent: Intent, family: dict | None = None,
+                       domain_ctx: "DomainContext | None" = None) -> dict:
     """
     Generate a feature model, valid configuration, and initial BOM.
 
@@ -548,6 +606,11 @@ Family constraints (must all be satisfied):
 
     product_type = family.get("family", {}).get("product_type", "product") if family else "product"
 
+    # Domain knowledge context (RAG + graph)
+    domain_block = ""
+    if domain_ctx and not domain_ctx.is_empty():
+        domain_block = f"\n{domain_ctx.prompt_block()}\n"
+
     prompt = f"""
 You are a PLM configurator for: {product_type}.
 Output ONLY a valid JSON object with these keys:
@@ -561,7 +624,7 @@ Output ONLY a valid JSON object with these keys:
     "category"    (appropriate category for this product type),
     "quantity"    (integer)
 
-{family_block + chr(10) if family_block else ""}User intent:
+{family_block + chr(10) if family_block else ""}{domain_block}User intent:
 {intent.as_prompt_block()}
 
 Rules:
@@ -584,8 +647,9 @@ Rules:
                 prompt += "\n\nIMPORTANT: Output ONLY the JSON object. No prose, no markdown, no trailing text."
             else:
                 raise RuntimeError(f"Configurator failed to return valid JSON: {e}") from e
-    result["_intent"] = intent  # carry intent forward for other agents
-    result["_family"] = family  # carry family forward for evaluator/optimizer
+    result["_intent"]         = intent       # carry intent forward for other agents
+    result["_family"]         = family       # carry family forward for evaluator/optimizer
+    result["_domain_context"] = domain_ctx  # carry domain context forward
 
     print(f"\n  ✓ Features : {list(result.get('features', {}).keys())}")
     print(f"  ✓ Config   : {result.get('configuration', {})}")
@@ -609,8 +673,9 @@ def evaluator_agent(config: dict) -> dict:
     }
     """
     separator("EVALUATOR AGENT")
-    intent: Intent = config.get("_intent")
-    family: dict   = config.get("_family") or {}
+    intent:     Intent        = config.get("_intent")
+    family:     dict          = config.get("_family") or {}
+    domain_ctx: DomainContext = config.get("_domain_context")  # type: ignore[assignment]
 
     config_data = {
         "configuration": config.get("configuration", {}),
@@ -621,6 +686,28 @@ def evaluator_agent(config: dict) -> dict:
     dims         = family.get("scoring_dimensions", [])
     product_type = family.get("family", {}).get("product_type", "product")
     intent_block = intent.as_prompt_block() if intent else ""
+
+    # Query knowledge graph for relevant constraints before scoring
+    graph_block = ""
+    if domain_ctx and not domain_ctx.is_empty():
+        bom_names  = [p.get("name", "") for p in config.get("bom", [])]
+        cfg_values = list(config.get("configuration", {}).values())
+        kw_source  = " ".join(bom_names[:8] + cfg_values[:4])
+        from domain_knowledge import _extract_keywords
+        kw = _extract_keywords(kw_source)
+        extra_triples = domain_ctx._kg.query(kw) if hasattr(domain_ctx, "_kg") else []
+        # Merge with existing triples (no duplicates)
+        existing_keys = {(t.subject, t.relation, t.object)
+                         for t in domain_ctx.graph_triples}
+        new_triples   = [t for t in extra_triples
+                         if (t.subject, t.relation, t.object) not in existing_keys]
+        all_triples   = domain_ctx.graph_triples + new_triples
+        if all_triples:
+            graph_block = (
+                "\nKnowledge graph constraints to consider during scoring:\n"
+                + "\n".join(t.as_context_line() for t in all_triples[:15])
+                + "\n"
+            )
 
     # Build score schema from family dimensions
     score_schema = "\n".join(
@@ -646,7 +733,7 @@ Evaluate the configuration below. Output ONLY a valid JSON object with these key
 
 User intent:
 {intent_block}
-
+{graph_block}
 Product configuration:
 {json.dumps(config_data)}
 
@@ -679,6 +766,20 @@ Output JSON only.
     if normal:
         print(f"  Normal  : {normal}")
     print(f"  Summary → {result.get('summary', '')}")
+
+    # Validation trace — record which context types informed this evaluation
+    if domain_ctx:
+        cov = domain_ctx.vv_coverage()
+        result["_validation_trace"] = {
+            "graph":        cov["graph"],
+            "rag":          cov["rag"],
+            "llm_reasoned": cov["llm_reasoned"],
+            "graph_block_used": bool(graph_block),
+        }
+        if graph_block:
+            print(f"  ✓ Graph context applied ({cov['graph']} sourced, "
+                  f"{cov['llm_reasoned']} llm_reasoned triples)")
+
     return result
 
 
@@ -721,10 +822,15 @@ def optimizer_agent(config: dict, evaluation: dict) -> dict:
         "constraints":   config.get("constraints", []),
     }
 
-    family: dict   = config.get("_family") or {}
+    family: dict          = config.get("_family") or {}
+    domain_ctx: DomainContext = config.get("_domain_context")  # type: ignore[assignment]
     product_type   = family.get("family", {}).get("product_type", "product")
     dims           = family.get("scoring_dimensions", [])
-    dim_labels = ", ".join(d["name"] for d in dims) if dims else "quality"
+    dim_labels     = ", ".join(d["name"] for d in dims) if dims else "quality"
+
+    domain_block = ""
+    if domain_ctx and not domain_ctx.is_empty():
+        domain_block = f"\n{domain_ctx.prompt_block()}\n"
 
     prompt = f"""
 You are a product design optimizer for: {product_type}.
@@ -732,6 +838,7 @@ Improve the configuration below to fix issues and raise scores.
 
 User intent:
 {intent_block}
+{domain_block}
 
 Priority order:
 1. Fix ALL critical issues — especially any hard constraint violations.
@@ -776,8 +883,9 @@ Rules:
                     "Keep changes list to 5 items max.")
             else:
                 raise RuntimeError(f"Optimizer failed to return valid JSON after 3 attempts: {e}") from e
-    result["_intent"] = config.get("_intent")  # carry intent forward
-    result["_family"] = config.get("_family")  # carry family forward
+    result["_intent"]         = config.get("_intent")         # carry intent forward
+    result["_family"]         = config.get("_family")         # carry family forward
+    result["_domain_context"] = config.get("_domain_context") # carry domain context forward
 
     print(f"\n  Changes:")
     for change in result.get("changes", []):
@@ -900,19 +1008,28 @@ Rules:
 
     # ── Step 2: Call DALL-E 3 ─────────────────────────────────
     print("\n  Calling DALL-E 3...")
-    r = requests.post(
-        "https://api.openai.com/v1/images/generations",
-        headers={"Authorization": f"Bearer {OPENAI_API_KEY}",
-                 "Content-Type": "application/json"},
-        json={
-            "model":   "dall-e-3",
-            "prompt":  image_prompt,
-            "size":    "1792x1024",
-            "quality": "hd",
-            "n":       1,
-        },
-        timeout=60,
-    )
+    for _attempt in range(2):
+        try:
+            r = requests.post(
+                "https://api.openai.com/v1/images/generations",
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}",
+                         "Content-Type": "application/json"},
+                json={
+                    "model":   "dall-e-3",
+                    "prompt":  image_prompt,
+                    "size":    "1792x1024",
+                    "quality": "hd",
+                    "n":       1,
+                },
+                timeout=120,
+            )
+            break
+        except requests.exceptions.ReadTimeout:
+            if _attempt == 0:
+                print("  ⚠ DALL-E 3 timed out, retrying...")
+            else:
+                print("  ✗ DALL-E 3 timed out twice — skipping image.")
+                return {"status": "timeout", "file": None}
 
     if not r.ok:
         print(f"  ✗ DALL-E 3 error [{r.status_code}]: {r.text[:200]}")
@@ -1614,13 +1731,21 @@ def orchestrator(intent: Intent, family: dict) -> dict:
         print(f"  Context     : {intent.context}")
     print(f"  Max iters   : {MAX_ITER}")
 
-    # Step 1 — initial configuration (guided by family)
-    config          = configurator_agent(intent, family=family)
+    # Step 1 — domain knowledge (RAG + KG) — runs before configurator
+    product_type_str = family.get("family", {}).get("product_type", "")
+    domain_ctx       = domain_knowledge_agent(
+        product_idea = family.get("family", {}).get("name", ""),
+        product_type = product_type_str,
+        intent_goal  = intent.goal,
+    )
+
+    # Step 2 — initial configuration (guided by family + domain context)
+    config          = configurator_agent(intent, family=family, domain_ctx=domain_ctx)
     best_bom        = config.get("bom", [])
     last_eval       = {}
     score_history   = []   # [{iteration, scores}] for the journey chart
 
-    # Step 2 — evaluate / optimize loop
+    # Step 3 — evaluate / optimize loop
     for iteration in range(1, MAX_ITER + 1):
         separator(f"ITERATION {iteration} / {MAX_ITER}")
 
@@ -1653,20 +1778,21 @@ def orchestrator(intent: Intent, family: dict) -> dict:
         optimized = optimizer_agent(config, last_eval)
         config = {
             **config,
-            "configuration": optimized.get("configuration", config.get("configuration")),
-            "bom":           optimized.get("bom", best_bom),
+            "configuration":  optimized.get("configuration", config.get("configuration")),
+            "bom":            optimized.get("bom", best_bom),
+            "_domain_context": domain_ctx,  # ensure ctx never drops off
         }
         best_bom = config.get("bom", best_bom)
 
     # Save session (BOM + family) so the user can skip straight to CAD next run
     _save_last_bom(best_bom, family)
 
-    # Step 3 — persist to Airtable
+    # Step 4 — persist to Airtable
     product_type  = family.get("family", {}).get("product_type", "Product")
     assembly_name = f"AI-{product_type}: {intent.goal[:50]}"
     plm_result    = plm_agent(best_bom, parent_name=assembly_name)
 
-    # Step 4 — visualise / build
+    # Step 5 — visualise / build
     print(f"\n  BOM ready. {len(best_bom)} parts configured.")
     # DTI_VIS_CHOICE is set by the GUI to avoid an interactive prompt
     vis_choice = os.getenv("DTI_VIS_CHOICE", "")
@@ -1718,10 +1844,11 @@ def orchestrator(intent: Intent, family: dict) -> dict:
         "plm_result":    plm_result,
         "cad_result":    cad_result,
         "image_result":  image_result,
+        "domain_ctx":    domain_ctx,
     }
     _save_html_report(outcome)
 
-    # Step 6 — requirements document
+    # Step 8 — requirements document
     rm_data = requirements_agent(intent, family, config, last_eval)
     _save_rm_document(rm_data, outcome)
 
