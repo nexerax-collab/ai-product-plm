@@ -11,6 +11,33 @@ AI-driven product design — from idea to optimised BOM, requirements document, 
        │
        ▼
 ┌─────────────────────────────────────────────────────────────────┐
+│  INTENT ELICITATION AGENT                                       │
+│  Scores input depth: technical / mixed / vague                  │
+│                                                                 │
+│  If vague or mixed — asks up to 3 clarifying questions:         │
+│  "Is this stationary or mobile?"                                │
+│  "What certifications are required — IEC 62619, UL 9540?"      │
+│                                                                 │
+│  Synthesises answers into enriched goal + constraints + context │
+│  Detects domain: energy_storage → loads domain-specific sources │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  DOMAIN KNOWLEDGE AGENT  (RAG + Knowledge Graph)                │
+│  Loads domain-specific regulatory and engineering sources       │
+│                                                                 │
+│  energy_storage → IEC 62619:2022, UN 38.3, battery-archive.org │
+│  drone          → FAA Part 107, EASA UAS, ArduPilot docs        │
+│  automotive     → ISO 26262, AUTOSAR, MISRA C                   │
+│  aerospace      → NASA NTRS, ECSS standards                     │
+│  medical        → FDA 510(k), ISO 13485, ISO 14971              │
+│                                                                 │
+│  Tags each source: domain_specific | general | llm_reasoned     │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
 │  PRODUCT FAMILY AGENT                                           │
 │  Generates the product's feature model from scratch             │
 │                                                                 │
@@ -81,7 +108,8 @@ AI-driven product design — from idea to optimised BOM, requirements document, 
 ┌─────────────────────────────────────────────────────────────────┐
 │  HTML REPORT  (auto-opens in browser)                           │
 │  Radar chart · Optimization journey · BOM                       │
-│  BOM table with CSV export · Configuration · Issues · Render   │
+│  BOM table with CSV export · Configuration · Issues · Render    │
+│  Intent Elicitation trail · Domain sources · V&V coverage bar   │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -127,6 +155,10 @@ python plm_agents.py --idea "ergonomic standing desk"
 python plm_agents.py --idea "espresso machine" --goal "maximum extraction quality" --constraints "cost under €800, domestic voltage"
 ```
 
+When no `--goal` flag is given, the **Intent Elicitation Agent** runs interactively before the pipeline starts. It scores your input (technical / mixed / vague) and asks up to three clarifying questions informed by the detected product domain, then synthesises the answers into an enriched goal, constraint list, and context that flows into every downstream agent.
+
+Pass `--goal` to skip elicitation and go straight to the pipeline (used by the GUI and scripted runs).
+
 ### Desktop GUI
 ```bash
 python gui.py
@@ -145,6 +177,14 @@ git clone https://github.com/config-collab/ai-product-agents.git
 cd ai-product-agents
 pip install -r requirements.txt
 ```
+
+The RAG + knowledge graph layer (`llama-index`, `chromadb`, `kuzu`) is optional. Without it the pipeline runs normally — domain knowledge is silently skipped. To enable it:
+
+```bash
+pip install llama-index llama-index-vector-stores-chroma llama-index-embeddings-huggingface chromadb kuzu sentence-transformers
+```
+
+The first run downloads the `BAAI/bge-small-en-v1.5` embedding model (~130 MB) and builds a local vector store. Subsequent runs are fast.
 
 ### 2. Configure API keys
 
@@ -179,6 +219,7 @@ Creates all required Airtable tables automatically and verifies your API keys.
 
 | Agent | Model | Reason |
 |---|---|---|
+| Intent Elicitation | `claude-haiku-4-5` | Depth scoring + question synthesis — fast and cheap |
 | Product Family | `claude-haiku-4-5` | Structured data generation — fast and cheap |
 | Configurator, Evaluator, Optimizer | `claude-sonnet-4-6` | Reasoning quality matters here |
 | CAD planning | `claude-opus-4-6` | Extended thinking for geometry |
