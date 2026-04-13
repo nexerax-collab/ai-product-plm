@@ -52,11 +52,12 @@ except ImportError as _dk_err:
         rag_chunks: list = []
         graph_triples: list = []
         validation_trace: dict = {}
+        company_sources: list = []
         def prompt_block(self) -> str: return ""
         def is_empty(self) -> bool: return True
         def sources_for_report(self) -> list: return []
         def vv_coverage(self) -> dict:
-            return {"graph": 0, "rag": 0, "llm_reasoned": 0}
+            return {"company_sourced": 0, "graph": 0, "rag": 0, "llm_reasoned": 0}
 
 # ─────────────────────────────────────────────────────────────
 # INTENT ELICITATION  — optional, graceful fallback
@@ -512,7 +513,41 @@ def _persist_family(family_def: dict) -> dict:
     return counts
 
 
-def product_family_agent(product_idea: str) -> dict:
+def _load_company_constraints(product_idea: str) -> tuple[list[str], list[str], str]:
+    """
+    Lightweight loader — reads company_knowledge_{slug}.json without starting RAG/KG.
+    Returns (constraints, decisions, files_summary).
+    Called before product_family_agent so company constraints can inform the family.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "_", product_idea.lower()).strip("_")[:50]
+    path = os.path.join(os.path.dirname(__file__), f"company_knowledge_{slug}.json")
+    if not os.path.exists(path):
+        return [], [], ""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        constraints: list[str] = []
+        decisions:   list[str] = []
+        files: set[str] = set()
+        for r in data.get("records", []):
+            sf = r.get("source_file", "")
+            if sf:
+                files.add(sf)
+            for c in r.get("constraints", []):
+                if isinstance(c, str) and c.strip():
+                    constraints.append(c.strip())
+            for d in r.get("decisions", []):
+                if isinstance(d, str) and d.strip():
+                    decisions.append(d.strip())
+        summary = f"{len(data.get('records', []))} records from: {', '.join(sorted(files))}"
+        return constraints, decisions, summary
+    except Exception as _e:
+        print(f"  ⚠ Could not read company knowledge for family agent: {_e}")
+        return [], [], ""
+
+
+def product_family_agent(product_idea: str,
+                         company_constraints: list[str] | None = None) -> dict:
     """
     Generate a product family definition from a free-form product idea.
 
@@ -529,10 +564,21 @@ def product_family_agent(product_idea: str) -> dict:
     separator("PRODUCT FAMILY AGENT")
     print(f"  Product idea: {product_idea}")
 
+    # Build company constraints block if provided
+    company_block = ""
+    if company_constraints:
+        lines = ["COMPANY-VERIFIED CONSTRAINTS (must all be included — non-negotiable):"]
+        for c in company_constraints:
+            lines.append(f"  - {c}")
+        company_block = "\n".join(lines) + "\n\n"
+        print(f"  Company constraints loaded: {len(company_constraints)}")
+
     prompt = f"""
 Define a practical product family for this idea.
 
 Product idea: {product_idea}
+
+{company_block}
 
 Return exactly this JSON structure:
 
@@ -728,6 +774,23 @@ def evaluator_agent(config: dict) -> dict:
     product_type = family.get("family", {}).get("product_type", "product")
     intent_block = intent.as_prompt_block() if intent else ""
 
+    # Company-sourced constraints — injected before all other context
+    company_block = ""
+    if domain_ctx and getattr(domain_ctx, "company_sources", []):
+        lines = ["COMPANY-VERIFIED CONSTRAINTS (treat as hard constraints — highest confidence):"]
+        for r in domain_ctx.company_sources:
+            sf = r.get("source_file", "unknown")
+            sd = r.get("source_date", "")
+            for c in r.get("constraints", []):
+                if isinstance(c, str) and c.strip():
+                    src = f"[{sf}" + (f" {sd}" if sd else "") + "]"
+                    lines.append(f"  - {c.strip()}  {src}")
+            for d in r.get("decisions", []):
+                if isinstance(d, str) and d.strip():
+                    src = f"[{sf}" + (f" {sd}" if sd else "") + "]"
+                    lines.append(f"  • VERIFIED DECISION: {d.strip()}  {src}")
+        company_block = "\n".join(lines) + "\n"
+
     # Query knowledge graph for relevant constraints before scoring
     graph_block = ""
     if domain_ctx and not domain_ctx.is_empty():
@@ -774,7 +837,7 @@ Evaluate the configuration below. Output ONLY a valid JSON object with these key
 
 User intent:
 {intent_block}
-{graph_block}
+{company_block}{graph_block}
 Product configuration:
 {json.dumps(config_data)}
 
@@ -812,11 +875,18 @@ Output JSON only.
     if domain_ctx:
         cov = domain_ctx.vv_coverage()
         result["_validation_trace"] = {
-            "graph":        cov["graph"],
-            "rag":          cov["rag"],
-            "llm_reasoned": cov["llm_reasoned"],
-            "graph_block_used": bool(graph_block),
+            "company_sourced":    cov.get("company_sourced", 0),
+            "graph":              cov["graph"],
+            "rag":                cov["rag"],
+            "llm_reasoned":       cov["llm_reasoned"],
+            "graph_block_used":   bool(graph_block),
+            "company_block_used": bool(company_block),
+            "company_files":      domain_ctx.validation_trace.get("company_files_used", []),
         }
+        if company_block:
+            n_files = len(domain_ctx.validation_trace.get("company_files_used", []))
+            print(f"  ✓ Company knowledge applied ({n_files} file(s), "
+                  f"{len(getattr(domain_ctx, 'company_sources', []))} records)")
         if graph_block:
             print(f"  ✓ Graph context applied ({cov['graph']} sourced, "
                   f"{cov['llm_reasoned']} llm_reasoned triples)")
@@ -873,19 +943,33 @@ def optimizer_agent(config: dict, evaluation: dict) -> dict:
     if domain_ctx and not domain_ctx.is_empty():
         domain_block = f"\n{domain_ctx.prompt_block()}\n"
 
+    # Company constraints block for optimizer — never allowed to violate these
+    opt_company_block = ""
+    if domain_ctx and getattr(domain_ctx, "company_sources", []):
+        lines = ["COMPANY-VERIFIED CONSTRAINTS (absolute — never violate these):"]
+        for r in domain_ctx.company_sources:
+            sf = r.get("source_file", "unknown")
+            sd = r.get("source_date", "")
+            for c in r.get("constraints", []):
+                if isinstance(c, str) and c.strip():
+                    src = f"[{sf}" + (f" {sd}" if sd else "") + "]"
+                    lines.append(f"  - {c.strip()}  {src}")
+        opt_company_block = "\n".join(lines) + "\n\n"
+
     prompt = f"""
 You are a product design optimizer for: {product_type}.
 Improve the configuration below to fix issues and raise scores.
 
 User intent:
 {intent_block}
-{domain_block}
+{opt_company_block}{domain_block}
 
 Priority order:
 1. Fix ALL critical issues — especially any hard constraint violations.
 2. Then address normal issues where possible.
 3. Then improve scores toward the goal, focusing on: {dim_labels}
 4. Never violate a hard constraint while optimising.
+5. Company-verified constraints listed above are absolute — they can NEVER be relaxed.
 
 Output ONLY a valid JSON object with these keys:
 "configuration": dict of feature → selected option (updated)
@@ -2318,18 +2402,63 @@ def _save_html_report(outcome: dict) -> None:
 
     # ── Domain Knowledge: sources + V&V coverage ─────────────
     domain_ctx = outcome.get("domain_ctx")
-    sources_html = ""
-    vv_html      = ""
+    sources_html  = ""
+    vv_html       = ""
+    company_html  = ""
     if domain_ctx and not domain_ctx.is_empty():
-        sources = domain_ctx.sources_for_report()
-        cov     = domain_ctx.vv_coverage()
+        sources   = domain_ctx.sources_for_report()
+        cov       = domain_ctx.vv_coverage()
         val_trace = evaluation.get("_validation_trace", {})
+
+        # ── Company Knowledge section ─────────────────────────
+        company_records = getattr(domain_ctx, "company_sources", [])
+        if company_records:
+            ck_files_used = val_trace.get("company_files", [])
+            ck_rows = ""
+            for r in company_records:
+                sf  = r.get("source_file", "unknown")
+                sd  = r.get("source_date", "")
+                cons = r.get("constraints", [])
+                decs = r.get("decisions", [])
+                used_badge = (
+                    ' <span style="background:#dcfce7;color:#166534;padding:.1rem .4rem;'
+                    'border-radius:4px;font-size:.7rem;font-weight:600">applied</span>'
+                    if sf in ck_files_used else ""
+                )
+                cons_html = "".join(
+                    f"<li style='color:#1e40af;font-size:.82rem'>{c}</li>"
+                    for c in cons if isinstance(c, str) and c.strip()
+                )
+                decs_html = "".join(
+                    f"<li style='color:#0f766e;font-size:.82rem'>{d}</li>"
+                    for d in decs if isinstance(d, str) and d.strip()
+                )
+                ck_rows += (
+                    f"<tr>"
+                    f"<td style='font-weight:600;font-size:.84rem'>{sf}{used_badge}</td>"
+                    f"<td style='white-space:nowrap;color:#64748b'>{sd}</td>"
+                    f"<td><ul style='margin:0;padding-left:1.2rem'>{cons_html}</ul></td>"
+                    f"<td><ul style='margin:0;padding-left:1.2rem'>{decs_html}</ul></td>"
+                    f"</tr>"
+                )
+            company_html = f"""
+  <div class="section full" style="border-left:4px solid #1e40af">
+    <h2>Company Knowledge ({len(company_records)} records)</h2>
+    <p style="font-size:.82rem;color:#475569;margin:-.5rem 0 1rem">
+      Source: <code>company_knowledge_*.json</code> &nbsp;·&nbsp;
+      Applied to evaluator + optimizer as highest-priority constraints</p>
+    <table>
+      <tr><th>File</th><th>Date</th><th>Constraints used</th><th>Decisions used</th></tr>
+      {ck_rows}
+    </table>
+  </div>"""
 
         # Sources table rows — include source_tag badge
         _tag_styles = {
-            "domain_specific": ("background:#dbeafe;color:#1e40af", "domain"),
-            "general":         ("background:#f1f5f9;color:#475569",  "general"),
-            "llm_reasoned":    ("background:#fef3c7;color:#92400e",  "llm"),
+            "company_sourced": ("background:#dbeafe;color:#1e40af",  "company"),
+            "domain_specific": ("background:#ede9fe;color:#5b21b6",  "domain"),
+            "general":         ("background:#f1f5f9;color:#475569",   "general"),
+            "llm_reasoned":    ("background:#fef3c7;color:#92400e",   "llm"),
         }
         src_rows = ""
         for s in sources:
@@ -2357,16 +2486,20 @@ def _save_html_report(outcome: dict) -> None:
     </table>
   </div>"""
 
-        # V&V coverage indicator
-        total = cov["graph"] + cov["rag"] + cov["llm_reasoned"] or 1
+        # V&V coverage indicator — now includes company_sourced segment
+        n_company  = cov.get("company_sourced", 0)
+        total = (n_company + cov["graph"] + cov["rag"] + cov["llm_reasoned"]) or 1
+        pct_c  = round(n_company           / total * 100)
         pct_g  = round(cov["graph"]        / total * 100)
         pct_r  = round(cov["rag"]          / total * 100)
         pct_l  = round(cov["llm_reasoned"] / total * 100)
-        graph_used = "yes" if val_trace.get("graph_block_used") else "no"
+        graph_used   = "yes" if val_trace.get("graph_block_used")   else "no"
+        company_used = "yes" if val_trace.get("company_block_used") else "no"
         vv_html = f"""
   <div class="section full">
     <h2>V&amp;V Coverage Indicator</h2>
     <div style="display:flex;gap:1.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.75rem">
+      {f'<div style="display:flex;align-items:center;gap:.4rem"><div style="width:12px;height:12px;background:#1e40af;border-radius:2px"></div><span style="font-size:.82rem">Company sourced: <b>{n_company}</b></span></div>' if n_company else ''}
       <div style="display:flex;align-items:center;gap:.4rem">
         <div style="width:12px;height:12px;background:#6366f1;border-radius:2px"></div>
         <span style="font-size:.82rem">Graph sourced: <b>{cov['graph']}</b></span>
@@ -2379,15 +2512,17 @@ def _save_html_report(outcome: dict) -> None:
         <div style="width:12px;height:12px;background:#f59e0b;border-radius:2px"></div>
         <span style="font-size:.82rem">LLM-reasoned: <b>{cov['llm_reasoned']}</b></span>
       </div>
-      <span style="font-size:.82rem;color:#64748b">Graph applied to scoring: <b>{graph_used}</b></span>
+      <span style="font-size:.82rem;color:#64748b">Graph: <b>{graph_used}</b> &nbsp;·&nbsp; Company: <b>{company_used}</b></span>
     </div>
     <div style="height:14px;border-radius:7px;overflow:hidden;display:flex;background:#f1f5f9">
+      <div style="width:{pct_c}%;background:#1e40af" title="Company sourced"></div>
       <div style="width:{pct_g}%;background:#6366f1" title="Graph sourced"></div>
       <div style="width:{pct_r}%;background:#22c55e" title="RAG"></div>
       <div style="width:{pct_l}%;background:#f59e0b" title="LLM-reasoned"></div>
     </div>
     <p style="margin:.5rem 0 0;font-size:.78rem;color:#94a3b8">
-      Decisions backed by sourced knowledge: {pct_g + pct_r}% &nbsp;·&nbsp;
+      Company-verified: {pct_c}% &nbsp;·&nbsp;
+      Sourced knowledge: {pct_c + pct_g + pct_r}% &nbsp;·&nbsp;
       LLM-inferred: {pct_l}% &nbsp;·&nbsp;
       Stale sources: {sum(1 for c in domain_ctx.rag_chunks if c.stale)}
     </p>
@@ -2493,6 +2628,8 @@ def _save_html_report(outcome: dict) -> None:
   </div>
 
   {elicit_html}
+
+  {company_html}
 
   {sources_html}
 
@@ -2804,7 +2941,13 @@ if __name__ == "__main__":
             interactive         = _interactive_mode,
         )
 
-        family = product_family_agent(product_idea)
+        # Load company constraints before family agent so they inform the family definition
+        _ck_constraints, _ck_decisions, _ck_summary = _load_company_constraints(product_idea)
+        if _ck_constraints:
+            print(f"\n  Company knowledge detected: {_ck_summary}")
+
+        family = product_family_agent(product_idea,
+                                      company_constraints=_ck_constraints or None)
 
         # Non-interactive mode when --goal is supplied (e.g. from GUI)
         if args.goal:
