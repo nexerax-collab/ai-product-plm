@@ -2232,6 +2232,74 @@ def _save_html_report(outcome: dict) -> None:
                          f" — {v.get('description','')} <br><small>{cfg_preview}</small></div>")
 
 
+    # ── Domain Knowledge: sources + V&V coverage ─────────────
+    domain_ctx = outcome.get("domain_ctx")
+    sources_html = ""
+    vv_html      = ""
+    if domain_ctx and not domain_ctx.is_empty():
+        sources = domain_ctx.sources_for_report()
+        cov     = domain_ctx.vv_coverage()
+        val_trace = evaluation.get("_validation_trace", {})
+
+        # Sources table rows
+        src_rows = ""
+        for s in sources:
+            stale_badge = (' <span style="background:#fef2f2;color:#991b1b;padding:.1rem .4rem;'
+                           'border-radius:4px;font-size:.7rem;font-weight:600">STALE</span>'
+                           if s.get("stale") else "")
+            src_rows += (
+                f"<tr><td style='font-size:.82rem;word-break:break-all'>"
+                f"<a href='{s['url']}' target='_blank' style='color:#2563eb'>{s['url']}</a>"
+                f"{stale_badge}</td>"
+                f"<td style='white-space:nowrap'>{s['date']}</td>"
+                f"<td style='text-align:center'>{s['chunks']}</td></tr>"
+            )
+
+        sources_html = f"""
+  <div class="section full">
+    <h2>Domain Knowledge Sources ({len(sources)} sources, {len(domain_ctx.rag_chunks)} chunks)</h2>
+    <table>
+      <tr><th>Source URL</th><th>Date</th><th>Chunks</th></tr>
+      {src_rows if src_rows else '<tr><td colspan="3" style="color:#94a3b8">No sources retrieved.</td></tr>'}
+    </table>
+  </div>"""
+
+        # V&V coverage indicator
+        total = cov["graph"] + cov["rag"] + cov["llm_reasoned"] or 1
+        pct_g  = round(cov["graph"]        / total * 100)
+        pct_r  = round(cov["rag"]          / total * 100)
+        pct_l  = round(cov["llm_reasoned"] / total * 100)
+        graph_used = "yes" if val_trace.get("graph_block_used") else "no"
+        vv_html = f"""
+  <div class="section full">
+    <h2>V&amp;V Coverage Indicator</h2>
+    <div style="display:flex;gap:1.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.75rem">
+      <div style="display:flex;align-items:center;gap:.4rem">
+        <div style="width:12px;height:12px;background:#6366f1;border-radius:2px"></div>
+        <span style="font-size:.82rem">Graph sourced: <b>{cov['graph']}</b></span>
+      </div>
+      <div style="display:flex;align-items:center;gap:.4rem">
+        <div style="width:12px;height:12px;background:#22c55e;border-radius:2px"></div>
+        <span style="font-size:.82rem">RAG chunks: <b>{cov['rag']}</b></span>
+      </div>
+      <div style="display:flex;align-items:center;gap:.4rem">
+        <div style="width:12px;height:12px;background:#f59e0b;border-radius:2px"></div>
+        <span style="font-size:.82rem">LLM-reasoned: <b>{cov['llm_reasoned']}</b></span>
+      </div>
+      <span style="font-size:.82rem;color:#64748b">Graph applied to scoring: <b>{graph_used}</b></span>
+    </div>
+    <div style="height:14px;border-radius:7px;overflow:hidden;display:flex;background:#f1f5f9">
+      <div style="width:{pct_g}%;background:#6366f1" title="Graph sourced"></div>
+      <div style="width:{pct_r}%;background:#22c55e" title="RAG"></div>
+      <div style="width:{pct_l}%;background:#f59e0b" title="LLM-reasoned"></div>
+    </div>
+    <p style="margin:.5rem 0 0;font-size:.78rem;color:#94a3b8">
+      Decisions backed by sourced knowledge: {pct_g + pct_r}% &nbsp;·&nbsp;
+      LLM-inferred: {pct_l}% &nbsp;·&nbsp;
+      Stale sources: {sum(1 for c in domain_ctx.rag_chunks if c.stale)}
+    </p>
+  </div>"""
+
     # ── Image embed ───────────────────────────────────────────
     img_html = ""
     img_file = image_result.get("file")
@@ -2330,6 +2398,10 @@ def _save_html_report(outcome: dict) -> None:
       {variant_html}
     </div>
   </div>
+
+  {sources_html}
+
+  {vv_html}
 
   <div class="section full">
     <h2>Bill of Materials ({len(bom)} parts)</h2>
