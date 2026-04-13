@@ -59,6 +59,38 @@ except ImportError as _dk_err:
             return {"graph": 0, "rag": 0, "llm_reasoned": 0}
 
 # ─────────────────────────────────────────────────────────────
+# INTENT ELICITATION  — optional, graceful fallback
+# ─────────────────────────────────────────────────────────────
+try:
+    from intent_elicitation import (
+        IntentContext, intent_elicitation_agent
+    )
+    _INTENT_ELICITATION_AVAILABLE = True
+except ImportError as _ie_err:
+    _INTENT_ELICITATION_AVAILABLE = False
+
+    class IntentContext:  # type: ignore[no-redef]
+        """Stub when intent_elicitation.py is absent."""
+        original_input: str = ""
+        depth: str = "vague"
+        detected_domain: str = "default"
+        clarifications: list = []
+        enriched_goal: str = ""
+        enriched_constraints: str = ""
+        enriched_context: str = ""
+        def summary(self) -> str: return ""
+
+    def intent_elicitation_agent(product_idea, existing_goal="",  # type: ignore[misc]
+                                  existing_constraints="", existing_context="",
+                                  _interactive=True, **_kw):
+        ctx = IntentContext()
+        ctx.original_input = product_idea
+        ctx.enriched_goal = existing_goal
+        ctx.enriched_constraints = existing_constraints
+        ctx.enriched_context = existing_context
+        return ctx
+
+# ─────────────────────────────────────────────────────────────
 # CONFIGURATION  —  set via .env or environment variables
 # ─────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -376,9 +408,11 @@ def should_stop(evaluation: dict, iteration: int,
 
 def domain_knowledge_agent(product_idea: str,
                             product_type: str = "",
-                            intent_goal: str = "") -> "DomainContext":
+                            intent_goal: str = "",
+                            detected_domain: str = "") -> "DomainContext":
     """
     Retrieve RAG chunks + KG triples relevant to this product.
+    detected_domain: if provided by IntentElicitationAgent, skip re-detection.
     Returns a DomainContext (empty stub if domain_knowledge unavailable).
     Always succeeds — errors are logged, never raised.
     """
@@ -388,7 +422,8 @@ def domain_knowledge_agent(product_idea: str,
         return DomainContext()
     try:
         agent = get_domain_agent()
-        ctx   = agent.run(product_idea, product_type, intent_goal)
+        ctx   = agent.run(product_idea, product_type, intent_goal,
+                          detected_domain=detected_domain)
         trace = ctx.validation_trace
         print(f"  ✓ RAG     : {trace.get('rag_chunks', 0)} chunks "
               f"({trace.get('stale_chunks', 0)} stale)")
@@ -1709,7 +1744,8 @@ def cad_agent(bom: list, family: dict | None = None) -> dict:
 # ORCHESTRATOR
 # ─────────────────────────────────────────────────────────────
 
-def orchestrator(intent: Intent, family: dict) -> dict:
+def orchestrator(intent: Intent, family: dict,
+                  intent_ctx: "IntentContext | None" = None) -> dict:
     """
     Engineering loop (family already defined before calling):
       1. Configure (once, guided by family)
@@ -1732,11 +1768,14 @@ def orchestrator(intent: Intent, family: dict) -> dict:
     print(f"  Max iters   : {MAX_ITER}")
 
     # Step 1 — domain knowledge (RAG + KG) — runs before configurator
-    product_type_str = family.get("family", {}).get("product_type", "")
-    domain_ctx       = domain_knowledge_agent(
-        product_idea = family.get("family", {}).get("name", ""),
-        product_type = product_type_str,
-        intent_goal  = intent.goal,
+    # Use detected_domain from elicitation agent to skip re-detection inside domain agent
+    product_type_str  = family.get("family", {}).get("product_type", "")
+    detected_domain   = intent_ctx.detected_domain if intent_ctx else ""
+    domain_ctx        = domain_knowledge_agent(
+        product_idea    = family.get("family", {}).get("name", ""),
+        product_type    = product_type_str,
+        intent_goal     = intent.goal,
+        detected_domain = detected_domain,
     )
 
     # Step 2 — initial configuration (guided by family + domain context)
@@ -1837,6 +1876,7 @@ def orchestrator(intent: Intent, family: dict) -> dict:
 
     outcome = {
         "intent":        intent,
+        "intent_ctx":    intent_ctx,
         "family":        family,
         "final_config":  config,
         "evaluation":    last_eval,
@@ -2232,6 +2272,44 @@ def _save_html_report(outcome: dict) -> None:
                          f" — {v.get('description','')} <br><small>{cfg_preview}</small></div>")
 
 
+    # ── Intent Elicitation ────────────────────────────────────
+    intent_ctx   = outcome.get("intent_ctx")
+    elicit_html  = ""
+    if intent_ctx:
+        _depth_colors = {
+            "technical": ("#dcfce7", "#166534"),
+            "mixed":     ("#fef9c3", "#854d0e"),
+            "vague":     ("#fee2e2", "#991b1b"),
+        }
+        _dc, _tc = _depth_colors.get(intent_ctx.depth, ("#f1f5f9", "#334155"))
+        _domain_color = "#dbeafe" if intent_ctx.detected_domain != "default" else "#f1f5f9"
+        _domain_text  = "#1e40af" if intent_ctx.detected_domain != "default" else "#475569"
+
+        qa_rows = ""
+        for clar in getattr(intent_ctx, "clarifications", []):
+            qa_rows += (
+                f"<tr><td style='color:#64748b;font-style:italic'>{clar.question}</td>"
+                f"<td>{clar.answer}</td></tr>"
+            )
+
+        elicit_html = f"""
+  <div class="section full">
+    <h2>Intent Elicitation</h2>
+    <div style="display:flex;gap:.75rem;flex-wrap:wrap;margin-bottom:1rem">
+      <span style="background:{_dc};color:{_tc};padding:.2rem .65rem;border-radius:999px;
+                   font-size:.75rem;font-weight:700">depth: {intent_ctx.depth}</span>
+      <span style="background:{_domain_color};color:{_domain_text};padding:.2rem .65rem;
+                   border-radius:999px;font-size:.75rem;font-weight:700">
+        domain: {intent_ctx.detected_domain}</span>
+    </div>
+    <p style="margin:.25rem 0;font-size:.88rem"><strong>Original input:</strong>
+      {intent_ctx.original_input}</p>
+    {f'<p style="margin:.25rem 0;font-size:.88rem"><strong>Enriched goal:</strong> {intent_ctx.enriched_goal}</p>' if intent_ctx.enriched_goal else ''}
+    {f'<p style="margin:.25rem 0;font-size:.88rem"><strong>Enriched constraints:</strong> {intent_ctx.enriched_constraints}</p>' if intent_ctx.enriched_constraints else ''}
+    {f'<p style="margin:.25rem 0;font-size:.88rem"><strong>Context:</strong> {intent_ctx.enriched_context}</p>' if intent_ctx.enriched_context else ''}
+    {f'<h3 style="margin:1rem 0 .5rem;font-size:.88rem;color:#475569">Clarification trail</h3><table><tr><th>Question</th><th>Answer</th></tr>{qa_rows}</table>' if qa_rows else ''}
+  </div>"""
+
     # ── Domain Knowledge: sources + V&V coverage ─────────────
     domain_ctx = outcome.get("domain_ctx")
     sources_html = ""
@@ -2241,16 +2319,25 @@ def _save_html_report(outcome: dict) -> None:
         cov     = domain_ctx.vv_coverage()
         val_trace = evaluation.get("_validation_trace", {})
 
-        # Sources table rows
+        # Sources table rows — include source_tag badge
+        _tag_styles = {
+            "domain_specific": ("background:#dbeafe;color:#1e40af", "domain"),
+            "general":         ("background:#f1f5f9;color:#475569",  "general"),
+            "llm_reasoned":    ("background:#fef3c7;color:#92400e",  "llm"),
+        }
         src_rows = ""
         for s in sources:
             stale_badge = (' <span style="background:#fef2f2;color:#991b1b;padding:.1rem .4rem;'
                            'border-radius:4px;font-size:.7rem;font-weight:600">STALE</span>'
                            if s.get("stale") else "")
+            tag        = s.get("source_tag", "general")
+            _ts, _tl   = _tag_styles.get(tag, ("background:#f1f5f9;color:#475569", tag))
+            tag_badge  = (f' <span style="{_ts};padding:.1rem .4rem;border-radius:4px;'
+                          f'font-size:.7rem;font-weight:600">{_tl}</span>')
             src_rows += (
                 f"<tr><td style='font-size:.82rem;word-break:break-all'>"
                 f"<a href='{s['url']}' target='_blank' style='color:#2563eb'>{s['url']}</a>"
-                f"{stale_badge}</td>"
+                f"{stale_badge}{tag_badge}</td>"
                 f"<td style='white-space:nowrap'>{s['date']}</td>"
                 f"<td style='text-align:center'>{s['chunks']}</td></tr>"
             )
@@ -2398,6 +2485,8 @@ def _save_html_report(outcome: dict) -> None:
       {variant_html}
     </div>
   </div>
+
+  {elicit_html}
 
   {sources_html}
 
@@ -2697,15 +2786,33 @@ if __name__ == "__main__":
         image_agent(last_bom, last_family, fake_intent)
     else:
         product_idea = args.idea or ask_product_idea()
-        family       = product_family_agent(product_idea)
+
+        # ── Intent Elicitation (runs before family agent) ─────────
+        # Non-interactive when --goal is provided (GUI path / scripted)
+        _interactive_mode = not bool(args.goal)
+        intent_ctx = intent_elicitation_agent(
+            product_idea        = product_idea,
+            existing_goal       = args.goal,
+            existing_constraints= args.constraints,
+            existing_context    = args.context,
+            interactive         = _interactive_mode,
+        )
+
+        family = product_family_agent(product_idea)
+
         # Non-interactive mode when --goal is supplied (e.g. from GUI)
         if args.goal:
-            constraints = [c.strip() for c in args.constraints.split(",") if c.strip()]
-            intent = Intent(goal=args.goal, constraints=constraints, context=args.context)
+            # Use enriched values from elicitation if synthesis produced something,
+            # otherwise fall back to raw CLI args
+            goal_str  = intent_ctx.enriched_goal or args.goal
+            cons_str  = intent_ctx.enriched_constraints or args.constraints
+            ctx_str   = intent_ctx.enriched_context or args.context
+            constraints = [c.strip() for c in cons_str.split(",") if c.strip()]
+            intent = Intent(goal=goal_str, constraints=constraints, context=ctx_str)
             print(f"\n  Intent (from CLI args):")
             print(f"    Goal        : {intent.goal}")
             print(f"    Constraints : {intent.constraints}")
             print(f"    Context     : {intent.context or 'none'}")
         else:
             intent = ask_intent(family)
-        orchestrator(intent, family)
+        orchestrator(intent, family, intent_ctx=intent_ctx)
