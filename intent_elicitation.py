@@ -60,6 +60,13 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
         "iso 14971", "iec 60601", "biocompatibility", "sterilization",
         "clinical", "patient", "wearable", "diagnostic",
     ],
+    "electronics": [
+        "pcb", "microcontroller", "mcu", "embedded", "arduino", "raspberry pi",
+        "rp2040", "esp32", "stm32", "fpga", "soc", "gpio", "uart", "spi", "i2c",
+        "jtag", "swd", "bootloader", "firmware", "kicad", "breadboard",
+        "dev board", "development board", "single board", "micropython",
+        "circuitpython", "bare metal", "rtos", "schematic",
+    ],
 }
 
 # Domain-specific clarifying question banks
@@ -98,6 +105,13 @@ _DOMAIN_QUESTIONS: dict[str, list[str]] = {
         "What is the intended patient population and clinical environment?",
         "Is the device life-sustaining or life-supporting?",
         "What sterilization method will be used — EtO, gamma, steam, or e-beam?",
+    ],
+    "electronics": [
+        "What microcontroller or SoC family is preferred — RP2040, ESP32, STM32, or open?",
+        "What connectivity is required — USB only, Wi-Fi, Bluetooth, LoRa, Ethernet?",
+        "What is the target BOM cost per unit and expected production volume?",
+        "What programming environment must be supported — MicroPython, Arduino, C/C++ SDK?",
+        "Are there specific certifications needed — FCC, CE, RoHS, or OSHWA open hardware?",
     ],
     "default": [
         "What is the primary end-user and their technical expertise level?",

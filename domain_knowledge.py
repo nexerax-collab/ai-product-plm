@@ -3,7 +3,7 @@ Domain Knowledge — Layer 1: RAG  |  Layer 2: Knowledge Graph
 =============================================================
 Layer 1 — RAG (LlamaIndex + ChromaDB)
   Dynamic domain detection: drone, energy_storage, automotive,
-  aerospace, medical, default.
+  aerospace, medical, electronics, default.
   Each domain loads product-specific regulatory/engineering sources.
   Sources tagged: domain_specific / general / llm_reasoned.
   Returns top-5 chunks per intent; flags chunks older than 2 years.
@@ -25,6 +25,9 @@ import os
 import re
 import textwrap
 from dataclasses import dataclass, field
+
+# Suppress HuggingFace symlink warning on Windows (cosmetic only — caching still works)
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DATA TYPES
@@ -144,13 +147,21 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
         "510k", "mdr", "iso 13485", "clinical", "biocompatible", "sterile",
         "hospital", "patient", "therapy", "wearable health",
     ],
+    "electronics": [
+        "pcb", "microcontroller", "mcu", "embedded", "arduino", "raspberry pi",
+        "rp2040", "esp32", "stm32", "fpga", "soc", "gpio", "uart", "spi", "i2c",
+        "jtag", "swd", "bootloader", "firmware", "kicad", "altium", "eagle",
+        "schematic", "soldering", "breadboard", "prototype board", "dev board",
+        "development board", "single board", "bare metal", "rtos", "micropython",
+        "circuitpython", "register", "interrupt", "pwm", "adc", "dac",
+    ],
 }
 
 
 def detect_domain(product_idea: str) -> str:
     """
     Classify a product idea into a domain using keyword matching.
-    Returns one of: drone | energy_storage | automotive | aerospace | medical | default.
+    Returns one of: drone | energy_storage | automotive | aerospace | medical | electronics | default.
     """
     text = product_idea.lower()
     # Score each domain by keyword hits
@@ -522,6 +533,91 @@ def _docs_medical(product_type: str) -> list[dict]:
     ]
 
 
+def _docs_electronics(product_type: str) -> list[dict]:
+    return [
+        {
+            "text": textwrap.dedent(f"""\
+                IPC-2221B — Generic Standard on Printed Board Design (2012).
+                Trace width vs. current capacity: 1 oz copper, 1mm trace ≈ 1 A sustained.
+                Clearance: ≥0.1 mm at 50 V; ≥0.4 mm at 150 V (internal layers tighter).
+                Via drill: minimum 0.2 mm for standard PCB; 0.1 mm for HDI.
+                Annular ring: ≥0.05 mm (IPC Class 2) or ≥0.025 mm (Class 3 high-rel).
+                Solder mask: LPI (Liquid Photo-Imageable) preferred; ENIG finish for fine pitch.
+                Thermal relief: spokes on pads connected to large copper planes.
+                Component keepout: ≥1.5 mm from board edge for SMD; ≥2 mm for through-hole.
+                Design rule check (DRC): mandatory before Gerber generation.
+                Fabrication notes: include drill file, stackup, impedance targets."""),
+            "url":  "https://www.ipc.org/TOC/IPC-2221B.pdf",
+            "date": "2024-01",
+            "source_tag": "domain_specific",
+        },
+        {
+            "text": textwrap.dedent(f"""\
+                RP2040 / Raspberry Pi Pico — hardware design guide (2023).
+                Core: dual ARM Cortex-M0+ at up to 133 MHz; 264 KB SRAM (6 banks).
+                Flash: external QSPI (max 16 MB); XIP (execute-in-place) via cache.
+                GPIO: 30 multi-function pins; 3.3 V logic; NOT 5 V tolerant.
+                Peripherals: 2× UART, 2× SPI, 2× I²C, 16× PWM, 4× ADC (12-bit, 500 ksps).
+                USB: USB 1.1 host/device via internal PHY (no external USB chip needed).
+                PIO: 2× programmable I/O blocks, 8 state machines — custom protocols.
+                Power: SMPS (RT6150) + LDO on Pico board; 1.8–5.5 V input range.
+                MicroPython: full support, official UF2 bootloader image.
+                Arduino: arduino-pico core (Earle Philhower); C/C++ SDK (BSD-3-Clause).
+                Footprint: 21 × 51 mm; castellated edge for SMD mounting."""),
+            "url":  "https://datasheets.raspberrypi.com/rp2040/hardware-design-with-rp2040.pdf",
+            "date": "2024-03",
+            "source_tag": "domain_specific",
+        },
+        {
+            "text": textwrap.dedent(f"""\
+                ESP32 family — hardware design guidelines (Espressif, 2023).
+                ESP32-C3: single RISC-V core 160 MHz; 400 KB SRAM; Wi-Fi 802.11b/g/n + BT 5.0 LE.
+                ESP32-S3: dual Xtensa LX7 240 MHz; 512 KB SRAM; vector extensions for ML.
+                PCB antenna keep-out: 15 mm clearance under chip antenna; no copper pour.
+                RF ground plane: continuous under module except antenna keep-out.
+                Decoupling: 10 µF + 100 nF on each VDD33 pin; place within 0.5 mm of pin.
+                Flash: internal (C3: 4 MB typical) or external SPI (ESP32: up to 16 MB).
+                JTAG/SWD: ESP-PROG or built-in USB-JTAG (ESP32-C3/S3).
+                OTA: Wi-Fi OTA via IDF esp_https_ota; partition table must have two app slots.
+                Regulatory: FCC ID / CE marked on certified modules (e.g. ESP32-C3-MINI-1)."""),
+            "url":  "https://www.espressif.com/sites/default/files/documentation/esp32-c3_hardware_design_guidelines_en.pdf",
+            "date": "2024-02",
+            "source_tag": "domain_specific",
+        },
+        {
+            "text": textwrap.dedent(f"""\
+                STM32 hardware design guide — CortexM MCU PCB recommendations (ST, 2023).
+                Decoupling: 100 nF ceramic per VDD pin + 4.7 µF bulk; place <0.5 mm from pin.
+                Crystal: keep trace short (<10 mm), guard ring to GND, no signal routing under.
+                Reset: 100 nF on NRST; external pull-up optional (internal pull-up on most devices).
+                Boot pins: BOOT0 strap to GND (normal run) or VDD (bootloader) via 10 kΩ.
+                SWD: 4-pin (SWDIO, SWDCLK, GND, VDD); 10 kΩ pull-up on SWDIO.
+                Embedded bootloader: USART1/USB DFU — no external programmer required.
+                Clock: HSE (external crystal) recommended for USB; HSI ±1% for UART.
+                EMC: ferrite bead on VDD_USB; TVS on exposed I/O pins."""),
+            "url":  "https://www.st.com/resource/en/application_note/an4488-getting-started-with-stm32-stm32cubemx.pdf",
+            "date": "2024-01",
+            "source_tag": "domain_specific",
+        },
+        {
+            "text": textwrap.dedent(f"""\
+                General embedded / PCB engineering — {product_type}.
+                Power budget: sum all rail currents; add 20% margin; select regulator accordingly.
+                LDO vs SMPS: LDO simple but wastes (Vin-Vout)×I as heat; SMPS >85% efficient.
+                USB power: USB 2.0 = 500 mA max; USB 3.0 = 900 mA; USB-C PD up to 100 W.
+                ESD protection: TVS or Schottky arrays on all external-facing pins.
+                Level shifting: TXS0108E (bidirectional auto-dir) or MOSFET for simple cases.
+                Thermal: θJA for SOT-23 ≈ 200°C/W; ensure ambient + P_diss × θJA < Tjmax.
+                Test points: add TP on every power rail, key signals, and ground.
+                BOM cost reduction: use JLCPCB basic parts library; prefer 0402 passives.
+                Open source toolchain: KiCad 7 (GPL), OpenOCD (GPL), GCC ARM (GPL), PlatformIO."""),
+            "url":  "https://www.engineeringtoolbox.com/embedded-electronics-design.html",
+            "date": "2024-01",
+            "source_tag": "general",
+        },
+    ]
+
+
 def _docs_default(product_type: str) -> list[dict]:
     slug = re.sub(r"[^a-z0-9_]", "_", product_type.lower())[:64]
     return [
@@ -595,6 +691,7 @@ _DOMAIN_DOC_BUILDERS = {
     "automotive":     _docs_automotive,
     "aerospace":      _docs_aerospace,
     "medical":        _docs_medical,
+    "electronics":    _docs_electronics,
     "default":        _docs_default,
 }
 
@@ -852,8 +949,13 @@ class KnowledgeGraph:
     def _setup(self):
         try:
             import kuzu
+            import shutil
             self._kuzu = kuzu
-            os.makedirs(_KUZU_DIR, exist_ok=True)
+            # Kuzu 0.8+ creates the directory itself; if the directory already
+            # exists but is empty (e.g. from a failed prior run) it raises
+            # "Database path cannot be a directory" — remove it so Kuzu starts fresh.
+            if os.path.isdir(_KUZU_DIR) and not os.listdir(_KUZU_DIR):
+                shutil.rmtree(_KUZU_DIR)
             self._db   = kuzu.Database(_KUZU_DIR)
             self._conn = kuzu.Connection(self._db)
             self._init_schema()

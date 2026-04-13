@@ -566,7 +566,13 @@ Return exactly this JSON structure:
 Rules:
 - 5-10 features, 2-6 options per enum feature, 3-6 constraints, 2-3 variants.
 - scoring_dimensions: exactly 3 dimensions that matter most for this product type.
-  Examples for a bicycle: range_km, comfort, cost. For a camera: image_quality, portability, cost.
+  Choose dimensions that are DIRECTLY MEASURABLE on the actual product being designed.
+  Examples: bicycle → range_km, comfort_score, cost_usd.
+            camera  → image_quality_score, portability_score, cost_usd.
+            PCB dev board → compute_performance_mhz, developer_accessibility_score, cost_usd.
+            energy storage → usable_capacity_kwh, round_trip_efficiency_pct, cost_per_kwh.
+  NEVER choose a dimension that the product structurally cannot achieve
+  (e.g. network_range_km for a USB-only device, or speed_kmh for a stationary product).
 - All options must be real-world, specific values (not vague like "good battery").
 - Variants must each satisfy all constraints.
 - Output JSON only, no markdown outside the block.
@@ -726,7 +732,7 @@ def evaluator_agent(config: dict) -> dict:
     graph_block = ""
     if domain_ctx and not domain_ctx.is_empty():
         bom_names  = [p.get("name", "") for p in config.get("bom", [])]
-        cfg_values = list(config.get("configuration", {}).values())
+        cfg_values = [str(v) for v in config.get("configuration", {}).values()]
         kw_source  = " ".join(bom_names[:8] + cfg_values[:4])
         from domain_knowledge import _extract_keywords
         kw = _extract_keywords(kw_source)
@@ -1950,8 +1956,8 @@ Design intent:
 Family constraints (rules): {json.dumps(constraints)}
 
 Scoring dimensions (what was optimised):
-{json.dumps([{{"name": d["name"], "description": d["description"],
-               "final_score": scores.get(d["name"], "n/a")}} for d in dims], indent=2)}
+{json.dumps([{"name": d["name"], "description": d["description"],
+               "final_score": scores.get(d["name"], "n/a")} for d in dims], indent=2)}
 
 Final BOM ({len(bom)} parts):
 {json.dumps(bom_summary, indent=2)}
@@ -1997,7 +2003,7 @@ Rules:
 
     raw = call_claude(prompt,
                       system="You are a systems engineer. Output JSON only.",
-                      max_tokens=4096)
+                      max_tokens=8192)
     try:
         rm = extract_json(raw)
     except Exception as e:
